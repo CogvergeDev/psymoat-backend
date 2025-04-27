@@ -58,6 +58,21 @@ def create_module_table_route():
     dynamodb.create_module_table()
     return 'Module Table created', 200
 
+@app.route('/create-test-table')
+def create_test_table_route():
+    dynamodb.create_test_table()
+    return 'Test Table created', 200
+
+@app.route('/create-live-lec-table')
+def create_live_lec_table_route():
+    dynamodb.create_live_lecture_table()
+    return 'Live Lecture Table created', 200
+
+@app.route('/create-video-table')
+def create_video_table_route():
+    dynamodb.create_video_table()
+    return 'Video Table created', 200
+
 
 # INITIALIZATION ROUTES
 @app.route('/initialize-new-module', methods=['POST'])

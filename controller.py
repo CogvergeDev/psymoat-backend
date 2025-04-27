@@ -53,7 +53,6 @@ def create_user_table():
         ProvisionedThroughput={'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
     )
 
-
 def create_exam_table():
     return dynamodb_resource.create_table(
         TableName='Exam',
@@ -61,7 +60,6 @@ def create_exam_table():
         AttributeDefinitions=[{'AttributeName': 'exam_id', 'AttributeType': 'S'}],
         ProvisionedThroughput={'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
     )
-
 
 def create_module_table():
     return dynamodb_resource.create_table(
@@ -71,7 +69,6 @@ def create_module_table():
         BillingMode='PAY_PER_REQUEST'
     )
 
-
 def create_qna_history_table():
     return dynamodb_resource.create_table(
         TableName='QNAHistory',
@@ -79,6 +76,32 @@ def create_qna_history_table():
         AttributeDefinitions=[{'AttributeName': 'qna_id', 'AttributeType': 'S'}],
         ProvisionedThroughput={'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
     )
+
+def create_test_table():
+    return dynamodb_resource.create_table(
+        TableName='Test',
+        KeySchema=[{'AttributeName': 'test_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'test_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
+def create_video_table():
+    return dynamodb_resource.create_table(
+        TableName='Video',
+        KeySchema=[{'AttributeName': 'video_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'video_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
+def create_live_lecture_table():
+    return dynamodb_resource.create_table(
+        TableName='LiveLecture',
+        KeySchema=[{'AttributeName': 'live_lec_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'live_lec_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
+
 
 
 # DATA OPERATIONS
