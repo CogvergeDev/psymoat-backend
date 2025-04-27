@@ -101,6 +101,14 @@ def create_live_lecture_table():
         BillingMode='PAY_PER_REQUEST'
     )
 
+def create_payments_table():
+    return dynamodb_resource.create_table(
+        TableName='Payments',
+        KeySchema=[{'AttributeName': 'payment_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'payment_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
 
 
 

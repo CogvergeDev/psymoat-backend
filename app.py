@@ -1,15 +1,20 @@
 # app.py
 
+from datetime import datetime
 import os
 from flask import Flask, request, jsonify
 import controller as dynamodb
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from flask_cors import CORS
 from dotenv import load_dotenv
+import razorpay
+from razorpay.errors import BadRequestError, ServerError as RazorpayServerError, SignatureVerificationError
+
 
 load_dotenv()
 
 app = Flask(__name__)
+
 
 CORS(
     app,
@@ -20,6 +25,15 @@ CORS(
     ],
     supports_credentials=True
 )
+
+
+razorpay_client = razorpay.Client(
+    auth=(
+        os.getenv("RAZORPAY_KEY_ID"),
+        os.getenv("RAZORPAY_KEY_SECRET")
+    )
+)
+
 
 app.config['JWT_SECRET_KEY'] = os.getenv("JWT_SECRET_KEY")
 app.config['JWT_TOKEN_LOCATION'] = ['cookies']
@@ -72,6 +86,11 @@ def create_live_lec_table_route():
 def create_video_table_route():
     dynamodb.create_video_table()
     return 'Video Table created', 200
+
+@app.route('/create-payments-table')
+def create_payments_table_route():
+    dynamodb.create_payments_table()
+    return 'Payments Table created', 200
 
 
 # INITIALIZATION ROUTES
@@ -265,6 +284,140 @@ def refresh():
 @app.route('/logout', methods=['POST'])
 def logout():
     return dynamodb.logout()
+
+
+
+@app.route('/razorpay/order/create/', methods=['POST'])
+@jwt_required
+def create_razorpay_order():
+    # Parse & validate JSON
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        return jsonify({
+            'error': 'Invalid JSON payload',
+            'details': str(e)
+        }), 400
+
+    amount = data.get('amount')
+    currency = data.get('currency', 'INR')
+
+    if amount is None:
+        return jsonify({'error': 'The "amount" field is required.'}), 400
+
+    # Validate amount type & value
+    try:
+        amt_int = int(amount)
+        if amt_int <= 0:
+            raise ValueError("Amount must be a positive integer")
+    except (ValueError, TypeError) as e:
+        return jsonify({
+            'error': 'Invalid "amount" value',
+            'details': str(e)
+        }), 400
+
+    # Create order with Razorpay
+    try:
+        razorpay_order = razorpay_client.order.create({
+            'amount': amt_int * 100,   # paise
+            'currency': currency,
+            'payment_capture': 1
+        })
+    except BadRequestError as e:
+        # client-side issue (e.g. unsupported currency)
+        return jsonify({
+            'error': 'Razorpay order creation failed (BadRequest)',
+            'details': str(e)
+        }), 400
+    except RazorpayServerError as e:
+        # server-side / gateway issue
+        return jsonify({
+            'error': 'Razorpay server error',
+            'details': str(e)
+        }), 502
+    except Exception as e:
+        # anything else
+        return jsonify({
+            'error': 'Unexpected error while creating order',
+            'details': str(e)
+        }), 500
+
+    # Success
+    return jsonify({'data': razorpay_order}), 200
+
+
+@app.route('/razorpay/order/complete/', methods=['POST'])
+@jwt_required
+def complete_razorpay_order():
+    # Parse & validate JSON
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        return jsonify({
+            'error': 'Invalid JSON payload',
+            'details': str(e)
+        }), 400
+
+    payment_id = data.get('payment_id')
+    order_id   = data.get('order_id')
+    signature  = data.get('signature')
+    amount = data.get('amount')
+    created_at = datetime.now()
+    user_id = data.get('user_id')
+    plan_id = data.get('plan_id')
+
+
+    missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
+    if missing:
+        return jsonify({
+            'error': 'Missing required fields',
+            'missing': missing
+        }), 400
+
+    # Verify signature
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            'razorpay_order_id':   order_id,
+            'razorpay_payment_id': payment_id,
+            'razorpay_signature':  signature
+        })
+    except SignatureVerificationError as e:
+        return jsonify({
+            'error': 'Signature verification failed',
+            'details': str(e)
+        }), 400
+    except Exception as e:
+        return jsonify({
+            'error': 'Unexpected error during signature verification',
+            'details': str(e)
+        }), 500
+
+    # Fetch payment details (optional)
+    try:
+        payment = razorpay_client.payment.fetch(payment_id)
+    except BadRequestError as e:
+        return jsonify({
+            'error': 'Failed to fetch payment (BadRequest)',
+            'details': str(e)
+        }), 400
+    except RazorpayServerError as e:
+        return jsonify({
+            'error': 'Razorpay server error while fetching payment',
+            'details': str(e)
+        }), 502
+    except Exception as e:
+        return jsonify({
+            'error': 'Unexpected error while fetching payment',
+            'details': str(e)
+        }), 500
+
+    #Todo:  put payment in db and update user 
+    return jsonify({
+        'status': 'success',
+        'message': 'Payment verified and fetched',
+        'payment': payment
+    }), 200
+
 
 
 if __name__ == '__main__':
