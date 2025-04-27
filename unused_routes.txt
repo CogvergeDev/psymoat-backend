@@ -1,0 +1,15 @@
+@app.route('/get-cookie', methods=['GET'])
+def get_cookie():
+    token = request.cookies.get('access_token')
+    if not token:
+        return jsonify({'error': 'No token found'}), 401
+    return jsonify({'token': token})
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    response = make_response(jsonify({'message': 'Logged out successfully'}))
+    response.set_cookie('access_token_cookie', '', expires=0)  # Delete the cookie
+    return response
+
+    
