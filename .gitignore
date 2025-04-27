@@ -6,3 +6,5 @@ __pycache__/
 
 config.py
 backend-psymoat-ec2.pem
+app.txt
+controller.txt
