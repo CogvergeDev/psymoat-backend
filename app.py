@@ -39,7 +39,7 @@ app.config['JWT_SECRET_KEY'] = os.getenv("JWT_SECRET_KEY")
 app.config['JWT_TOKEN_LOCATION'] = ['cookies']
 app.config['JWT_ACCESS_COOKIE_PATH'] = '/'
 app.config['JWT_REFRESH_COOKIE_PATH'] = '/refresh'
-app.config['JWT_COOKIE_SECURE'] = False       # Set to True in production
+app.config['JWT_COOKIE_SECURE'] = True       # Set to True in production
 app.config['JWT_COOKIE_SAMESITE'] = 'None'
 app.config['JWT_COOKIE_CSRF_PROTECT'] = False # Enable & handle CSRF for stronger protection
 
