@@ -1,6 +1,6 @@
 # app.py
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from flask import Flask, request, jsonify
 import controller as dynamodb
@@ -42,6 +42,7 @@ app.config['JWT_REFRESH_COOKIE_PATH'] = '/refresh'
 app.config['JWT_COOKIE_SECURE'] = True       # Set to True in production
 app.config['JWT_COOKIE_SAMESITE'] = 'None'
 app.config['JWT_COOKIE_CSRF_PROTECT'] = False # Enable & handle CSRF for stronger protection
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)  # Set token expiry to 1 day
 
 jwt = JWTManager(app)
 
