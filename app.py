@@ -64,6 +64,11 @@ def create_user_table_route():
     dynamodb.create_user_table()
     return 'User Table created', 200
 
+@app.route('/create-questions-table')
+def create_question_table_route():
+    dynamodb.create_question_table()
+    return 'Question Table created', 200
+
 @app.route('/create-exam-table')
 def create_exam_table_route():
     dynamodb.create_exam_table()
@@ -210,6 +215,29 @@ def get_module_questions(module_id):
     except Exception as e:
         return jsonify({'msg': f'An unexpected error occurred: {str(e)}'}), 500
 
+
+# NEW APIs 
+
+# Get questions from module and idx
+app.route('/get-questions/<string:module_id>/<int:idx>')
+@jwt_required()
+def get_questions(module_id, idx):
+    try:
+        response = dynamodb.get_questions(module_id, idx)
+        if not response:
+            return jsonify({'msg': 'No questions found'}), 404
+
+        if 'ResponseMetadata' in response and response['ResponseMetadata'].get('HTTPStatusCode') == 200:
+            if 'Item' in response:
+                return jsonify({'Item': response['Item']}), 200
+            return jsonify({'msg': 'Item not found!'}), 404
+
+        return jsonify({'msg': 'Some error occurred', 'response': response}), 500
+
+    except KeyError:
+        return jsonify({'msg': 'Invalid response structure'}), 500
+    except Exception as e:
+        return jsonify({'msg': f'An unexpected error occurred: {str(e)}'}), 500
 
 # SUBMITTING QNA ROUTE
 @app.route('/submit-questions', methods=['POST'])

@@ -34,6 +34,7 @@ UserTable = dynamodb_resource.Table('User')
 ExamTable = dynamodb_resource.Table('Exam')
 ModuleTable = dynamodb_resource.Table('Module')
 QNAHistoryTable = dynamodb_resource.Table('QNAHistory')
+QuestionTable = dynamodb_resource.Table('Question')
 
 
 def generate_id(size=6):
@@ -109,8 +110,56 @@ def create_payments_table():
         BillingMode='PAY_PER_REQUEST'
     )
 
+def create_question_table():
+    return dynamodb_resource.create_table(
+        TableName='Questions',
+        KeySchema=[{'AttributeName': 'question_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'question_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
 
 
+
+# NEW APIs
+
+def get_questions(module_id: str, idx: int) -> list:
+
+    """
+    Retrieve exactly 20 questions for a given module and page index.
+    Question IDs are assumed to be named '{module_id}_{n}' (n = 1, 2, …).
+    - idx=1 → IDs module_id_1 … module_id_20
+    - idx=2 → IDs module_id_21 … module_id_40
+    If fewer than 20 items are returned (i.e. the last page), returns [].
+    """
+    # compute the 1-based range for this page
+    start = (idx - 1) * 20 + 1
+    end   = idx * 20
+
+    # build the list of keys
+    keys = [{'question_id': f"{module_id}_{n}"} for n in range(start, end + 1)]
+
+    # batch‐get (and retry any unprocessed keys)
+    try:
+        request_items = { QuestionTable.name: {'Keys': keys} }
+        items = []
+
+        while request_items:
+            resp = dynamodb_resource.meta.client.batch_get_item(RequestItems=request_items)
+            # accumulate successful responses
+            items.extend(resp.get('Responses', {}).get(QuestionTable.name, []))
+            # retry unprocessed
+            request_items = resp.get('UnprocessedKeys', {})
+    except (ClientError, BotoCoreError) as e:
+        # bubble up or log as you prefer
+        raise
+
+    # if we didn’t get exactly 20, treat as “no page”
+    if len(items) != 20:
+        return []
+
+    # sort by the numeric suffix so they’re in order
+    items.sort(key=lambda it: int(it['question_id'].rsplit('_', 1)[1]))
+    return items
 
 # DATA OPERATIONS
 def get_module_questions(module_id):
