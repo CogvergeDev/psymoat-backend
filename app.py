@@ -9,6 +9,9 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import razorpay
 from razorpay.errors import BadRequestError, ServerError as RazorpayServerError, SignatureVerificationError
+from uuid import uuid4
+import csv
+from io import StringIO
 
 
 load_dotenv()
@@ -94,10 +97,11 @@ def create_video_table_route():
     dynamodb.create_video_table()
     return 'Video Table created', 200
 
-@app.route('/create-payments-table')
-def create_payments_table_route():
-    dynamodb.create_payments_table()
-    return 'Payments Table created', 200
+
+@app.route('/create-payment-history-table')
+def create_payment_history_table_route():
+    dynamodb.create_payment_history_table()
+    return 'PaymentHistory Table created', 200
 
 
 # INITIALIZATION ROUTES
@@ -140,39 +144,6 @@ def initialize_new_exam():
         return jsonify({"error": str(e)}), 500
 
 
-# ADDING MODULES TO DB ROUTE
-@app.route('/add-to-module/<string:module_id>', methods=['POST'])
-def add_to_module(module_id):
-    if not module_id:
-        return jsonify({"error": "module_id is required"}), 400
-
-    file = request.files.get('csv_file')
-    if not file:
-        return jsonify({"error": "CSV file is required"}), 400
-
-    try:
-        file_content = file.read().decode('utf-8')
-        from io import StringIO
-        import csv
-        csv_file = StringIO(file_content)
-        csv_reader = csv.DictReader(csv_file)
-
-        questionResponse = dynamodb.get_module_questions(module_id)
-        questions = questionResponse['Item']['questions']
-
-        for i, row in enumerate(csv_reader):
-            row['module_id'] = module_id
-            row['question_id'] = f"{module_id}_{i+1}"
-            questions.append(row)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    response = dynamodb.add_questions_in_module(module_id, questions)
-    if response.get('ResponseMetadata', {}).get('HTTPStatusCode') == 200:
-        return jsonify({'msg': 'Added successfully'}), 200
-
-    return jsonify({'msg': 'Some error occurred', 'response': response}), 500
 
 
 @app.route('/get-all-module-details', methods=['GET'])
@@ -195,21 +166,15 @@ def get_all_exam_details():
 
 
 # GETTING QUESTION FROM A MODULE
-@app.route('/get-module-questions/<string:module_id>', methods=['GET'])
+@app.route('/get-module-no-of-questions/<string:module_id>', methods=['GET'])
 @jwt_required()
-def get_module_questions(module_id):
+def get_module_no_of_questions(module_id):
     try:
-        response = dynamodb.get_module_questions(module_id)
+        response = dynamodb.get_module_no_of_questions(module_id)
         if not response:
             return jsonify({'msg': 'No questions found'}), 404
 
-        if 'ResponseMetadata' in response and response['ResponseMetadata'].get('HTTPStatusCode') == 200:
-            if 'Item' in response:
-                return jsonify({'Item': response['Item']}), 200
-            return jsonify({'msg': 'Item not found!'}), 404
-
-        return jsonify({'msg': 'Some error occurred', 'response': response}), 500
-
+        return response
     except KeyError:
         return jsonify({'msg': 'Invalid response structure'}), 500
     except Exception as e:
@@ -218,26 +183,99 @@ def get_module_questions(module_id):
 
 # NEW APIs 
 
-# Get questions from module and idx
-app.route('/get-questions/<string:module_id>/<int:idx>')
-@jwt_required()
-def get_questions(module_id, idx):
+# Get all questions from a module (ig dev api)
+@app.route('/get-all-questions/<string:module_id>')
+def get_all_questions(module_id):
     try:
-        response = dynamodb.get_questions(module_id, idx)
-        if not response:
+        questions = dynamodb.get_all_questions(module_id)
+        if not questions:
+            return jsonify({'msg': 'No questions found'}), 404
+        return jsonify({'questions': questions}), 200
+    except Exception as e:
+        return jsonify({'msg': f'An unexpected error occurred: {e}'}), 500
+
+
+@app.route('/add-to-module/<string:module_id>', methods=['POST'])
+def add_to_module(module_id):
+    if not module_id:
+        return jsonify({"error": "module_id is required"}), 400
+
+    file = request.files.get('csv_file')
+    if not file:
+        return jsonify({"error": "CSV file is required"}), 400
+
+    # load CSV
+    text = file.read().decode('utf-8')
+    reader = csv.DictReader(StringIO(text))
+    rows = list(reader)
+
+    free_counter = 1
+    paid_counter = 1
+    processed = []
+
+    for row in rows:
+        # parse the incoming "isPaid" column
+        is_paid = row.get('isPaid', '').strip().lower() == 'true'
+        row['is_paid'] = is_paid
+
+        # pick the right counter and suffix
+        if is_paid:
+            idx = paid_counter
+            paid_counter += 1
+            suffix = 'p'
+        else:
+            idx = free_counter
+            free_counter += 1
+            suffix = 'f'
+
+        # build question_id
+        row['question_id'] = f"{module_id}_{suffix}_{idx}"
+        processed.append(row)
+
+    try:
+        # Pass the counts of new questions being added
+        paid_count = paid_counter - 1  # Subtract 1 because counter starts at 1
+        free_count = free_counter - 1
+        result = dynamodb.add_questions_to_module(module_id, processed, paid_count, free_count)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "msg": "Questions added successfully",
+        "totalQuestions": result.get('numberOfQuestions'),
+        "paidQuestions": result.get('numberOfPaidQuestions'),
+        "freeQuestions": result.get('numberOfFreeQuestions'),
+        "allQuestionIds": result.get('questions', [])
+    }), 200
+
+@app.route('/get-questions/<string:module_id>/<string:question_type>/<int:idx>')
+@jwt_required()
+def route_get_questions_by_type(module_id, question_type, idx):
+    try:
+        is_paid = question_type.lower() == 'paid'
+        questions = dynamodb.get_questions_by_type(module_id, idx, is_paid)
+        if not questions:
             return jsonify({'msg': 'No questions found'}), 404
 
-        if 'ResponseMetadata' in response and response['ResponseMetadata'].get('HTTPStatusCode') == 200:
-            if 'Item' in response:
-                return jsonify({'Item': response['Item']}), 200
-            return jsonify({'msg': 'Item not found!'}), 404
+        return jsonify({'questions': questions}), 200
 
-        return jsonify({'msg': 'Some error occurred', 'response': response}), 500
-
-    except KeyError:
-        return jsonify({'msg': 'Invalid response structure'}), 500
     except Exception as e:
-        return jsonify({'msg': f'An unexpected error occurred: {str(e)}'}), 500
+        return jsonify({'msg': f'An unexpected error occurred: {e}'}), 500
+
+@app.route('/get-wrong-questions/<string:module_id>/<int:idx>', methods=['GET'])
+@jwt_required()
+def get_user_wrong_questions(module_id, idx):
+    try:
+        user_id = get_jwt_identity()
+        questions = dynamodb.get_wrong_questions(user_id, module_id, idx)
+        if not questions:
+            return jsonify({'msg': 'No wrong questions found'}), 404
+            
+        return jsonify({'questions': questions}), 200
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
 
 # SUBMITTING QNA ROUTE
 @app.route('/submit-questions', methods=['POST'])
@@ -379,7 +417,6 @@ def create_razorpay_order():
 @app.route('/razorpay/order/complete/', methods=['POST'])
 @jwt_required()
 def complete_razorpay_order():
-    # Parse & validate JSON
     try:
         data = request.get_json(force=True)
     except Exception as e:
@@ -389,13 +426,12 @@ def complete_razorpay_order():
         }), 400
 
     payment_id = data.get('payment_id')
-    order_id   = data.get('order_id')
-    signature  = data.get('signature')
+    order_id = data.get('order_id')
+    signature = data.get('signature')
     amount = data.get('amount')
-    created_at = datetime.now()
+    created_at = datetime.now().isoformat()
     user_id = data.get('user_id')
     plan_id = data.get('plan_id')
-
 
     missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
     if missing:
@@ -407,48 +443,83 @@ def complete_razorpay_order():
     # Verify signature
     try:
         razorpay_client.utility.verify_payment_signature({
-            'razorpay_order_id':   order_id,
+            'razorpay_order_id': order_id,
             'razorpay_payment_id': payment_id,
-            'razorpay_signature':  signature
+            'razorpay_signature': signature
         })
     except SignatureVerificationError as e:
         return jsonify({
             'error': 'Signature verification failed',
             'details': str(e)
         }), 400
-    except Exception as e:
-        return jsonify({
-            'error': 'Unexpected error during signature verification',
-            'details': str(e)
-        }), 500
 
-    # Fetch payment details (optional)
     try:
+        # Save payment details using controller function
+        payment_data = {
+            'payment_id': payment_id,
+            'order_id': order_id,
+            'amount': amount,
+            'created_at': created_at,
+            'signature': signature,
+            'user_id': user_id,
+            'plan_id': plan_id
+        }
+        dynamodb.save_payment_history(payment_data)
+
+        # Fetch payment details from Razorpay
         payment = razorpay_client.payment.fetch(payment_id)
-    except BadRequestError as e:
+        
         return jsonify({
-            'error': 'Failed to fetch payment (BadRequest)',
-            'details': str(e)
-        }), 400
-    except RazorpayServerError as e:
-        return jsonify({
-            'error': 'Razorpay server error while fetching payment',
-            'details': str(e)
-        }), 502
+            'status': 'success',
+            'message': 'Payment verified and saved',
+            'payment': payment
+        }), 200
+
     except Exception as e:
         return jsonify({
-            'error': 'Unexpected error while fetching payment',
+            'error': 'Failed to process payment',
             'details': str(e)
         }), 500
 
-    #Todo:  put payment in db and update user 
-    return jsonify({
-        'status': 'success',
-        'message': 'Payment verified and fetched',
-        'payment': payment
-    }), 200
 
+@app.route('/payment-history/<string:user_id>', methods=['GET'])
+@jwt_required()
+def get_user_payments(user_id):
+    try:
+        payments = dynamodb.get_user_payment_history(user_id)
+        return jsonify({'payments': payments}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch payment history: {str(e)}'}), 500
 
+@app.route('/payment/<string:payment_id>', methods=['GET'])
+@jwt_required()
+def get_payment(payment_id):
+    try:
+        payment = dynamodb.get_payment_details(payment_id)
+        if not payment:
+            return jsonify({'error': 'Payment not found'}), 404
+        return jsonify({'payment': payment}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch payment: {str(e)}'}), 500
+
+@app.route('/exam-module-stats', methods=['POST'])
+@jwt_required()
+def get_exam_module_statistics():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json()
+        if not data or not data.get('exam_id'):
+            return jsonify({
+                'error': 'Missing required fields: exam_id and user_id required'
+            }), 400
+
+        stats = dynamodb.get_exam_module_stats(data['exam_id'], user_id)
+        return jsonify(stats), 200
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
