@@ -21,7 +21,8 @@ CORS(
     origins=[
         "http://localhost:3000",
         "https://psymoat.vercel.app",
-        "https://www.psymoat.in"
+        "https://www.psymoat.in",
+        "https://dev-psymoat.vercel.app/"
     ],
     supports_credentials=True
 )
