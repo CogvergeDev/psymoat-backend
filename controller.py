@@ -593,6 +593,10 @@ def register(email, password, fullName):
             'joinedOn': get_time(),
             'lastLogin': '',
             'examsTaken': [],
+            'is_paid' : "false",
+            'plan_id': "free",
+            'plan_valid_till': ""
+
         }
         UserTable.put_item(Item=item)
         return jsonify({'msg': 'Registration successful'}), 201
