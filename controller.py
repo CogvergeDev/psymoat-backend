@@ -17,6 +17,13 @@ from flask_jwt_extended import (
     get_jwt_identity
 )
 from datetime import datetime
+import logging
+from dateutil.relativedelta import relativedelta
+from zoneinfo import ZoneInfo
+
+# define IST timezone
+IST = ZoneInfo("Asia/Kolkata")
+
 
 bcrypt = Bcrypt()
 
@@ -660,30 +667,97 @@ def get_questions_by_type(module_id: str, idx: int, is_paid: bool) -> list:
     items.sort(key=lambda it: int(it['question_id'].rsplit('_', 1)[1]))
     return items
 
-def save_payment_history(payment_data: dict) -> dict:
+def save_failed_payment_history(failure_data: dict) -> None:
     """
-    Save payment details to PaymentHistoryTable
+    Record a failed (or non-captured) payment into PaymentHistoryTable only.
     """
-    print(payment_data)
+    PaymentHistoryTable.put_item(Item={
+        'payment_id':    failure_data['payment_id'],
+        'order_id':      failure_data['order_id'],
+        'amount':        failure_data['amount'],
+        'status':        failure_data['status'],
+        'error_code':    failure_data.get('error_code'),
+        'error_desc':    failure_data.get('error_desc'),
+        'user_email':    failure_data['user_email'],
+        'plan_id':       failure_data.get('plan_id'),
+        'created_at':    failure_data['created_at']
+    })
+
+
+def save_successful_payment(payment_data: dict) -> dict:
+    """
+    1) Save payment to PaymentHistoryTable
+    2) Update the user in UserTable:
+       - mark is_paid = True
+       - set plan_id
+       - set plan_valid_till = now + 1 month
+    """
+    # 1) record the payment
+    PaymentHistoryTable.put_item(Item={
+        'payment_id':   payment_data['payment_id'],
+        'order_id':     payment_data['order_id'],
+        'amount':       payment_data['amount'],
+        'created_at':   payment_data['created_at'],
+        'signature':    payment_data['signature'],
+        'user_email':   payment_data['user_email'],
+        'plan_id':      payment_data['plan_id'],
+        'status':       'captured',
+    })
+
+    # 2) compute expiry exactly one month from now
+    expiry_dt  = datetime.now(IST) + relativedelta(months=1)
+    expiry_iso = expiry_dt.isoformat()
+
+    # 3) update or create the user record
+    user_response = UserTable.update_item(
+        Key={'email': payment_data['user_email']},
+        UpdateExpression="""
+            SET
+              is_paid            = :paid,
+              plan_id            = :plan,
+              plan_valid_till    = :valid
+        """,
+        ExpressionAttributeValues={
+            ':paid':  True,
+            ':plan':  payment_data['plan_id'],
+            ':valid': expiry_iso
+        },
+        ReturnValues="UPDATED_NEW"
+    )
+
+    return {
+        'status':  'success',
+        'message': 'Payment history saved and user subscription updated',
+        'user_update': user_response.get('Attributes', {})
+    }
+
+
+def delete_user_payment_fields(email: str) -> dict:
+    """
+    Remove is_paid, plan_id, and plan_valid_till
+    from the UserTable item keyed by `email`.
+    """
     try:
-        response = PaymentHistoryTable.put_item(
-            Item={
-                'payment_id': payment_data['payment_id'],
-                'order_id': payment_data['order_id'],
-                'amount': payment_data['amount'],
-                'created_at': payment_data['created_at'],
-                'signature': payment_data['signature'],
-                'user_id': payment_data['user_id'],
-                'plan_id': payment_data['plan_id']
-            }
+        resp = UserTable.update_item(
+            Key={ 'email': email },
+            UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till",
+            ReturnValues="UPDATED_OLD"  
+            # returns the old values of any removed attributes
         )
+        removed = resp.get('Attributes', {}) or {}
         return {
             'status': 'success',
-            'message': 'Payment history saved successfully',
-            'response': response
+            'message': f'Removed payment fields for {email}',
+            'removed_fields': removed
         }
-    except Exception as e:
-        raise RuntimeError(f"Failed to save payment history: {e}")
+    except ClientError as e:
+        logging.error("DynamoDB error on delete: %s", e.response['Error']['Message'])
+        raise RuntimeError(
+            f"Failed to delete payment fields for {email}: "
+            f"{e.response['Error']['Message']}"
+        )
+    
+
 
 def get_user_payment_history(user_id: str) -> list:
     """

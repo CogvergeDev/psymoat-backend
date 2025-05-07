@@ -12,6 +12,10 @@ from razorpay.errors import BadRequestError, ServerError as RazorpayServerError,
 from uuid import uuid4
 import csv
 from io import StringIO
+from zoneinfo import ZoneInfo
+
+# define IST timezone
+IST = ZoneInfo("Asia/Kolkata")
 
 
 load_dotenv()
@@ -413,7 +417,6 @@ def create_razorpay_order():
     # Success
     return jsonify({'data': razorpay_order}), 200
 
-
 @app.route('/razorpay/order/complete/', methods=['POST'])
 @jwt_required()
 def complete_razorpay_order():
@@ -425,17 +428,14 @@ def complete_razorpay_order():
             'details': str(e)
         }), 400
 
+    # required fields
     payment_id = data.get('payment_id')
-    order_id = data.get('order_id')
-    signature = data.get('signature')
-    amount = data.get('amount')
-    created_at = datetime.now().isoformat()
-    user_id = get_jwt_identity()
-    plan_id = data.get('plan_id')
-
-    print(payment_id, order_id, signature)
-    print(amount, plan_id)
-    print(user_id)
+    order_id   = data.get('order_id')
+    signature  = data.get('signature')
+    amount     = data.get('amount')
+    plan_id    = data.get('plan_id')
+    created_at = datetime.now(IST).isoformat()
+    user_email = get_jwt_identity()
 
     missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
     if missing:
@@ -444,12 +444,12 @@ def complete_razorpay_order():
             'missing': missing
         }), 400
 
-    # Verify signature
+    # verify signature
     try:
         razorpay_client.utility.verify_payment_signature({
-            'razorpay_order_id': order_id,
+            'razorpay_order_id':   order_id,
             'razorpay_payment_id': payment_id,
-            'razorpay_signature': signature
+            'razorpay_signature':  signature
         })
     except SignatureVerificationError as e:
         return jsonify({
@@ -457,34 +457,79 @@ def complete_razorpay_order():
             'details': str(e)
         }), 400
 
+    # fetch the real payment object
     try:
-        # Save payment details using controller function
-        payment_data = {
-            'payment_id': payment_id,
-            'order_id': order_id,
-            'amount': amount,
-            'created_at': created_at,
-            'signature': signature,
-            'user_id': user_id,
-            'plan_id': plan_id
-        }
-        dynamodb.save_payment_history(payment_data)
-
-        # Fetch payment details from Razorpay
         payment = razorpay_client.payment.fetch(payment_id)
-        
+    except Exception as e:
         return jsonify({
-            'status': 'success',
-            'message': 'Payment verified and saved',
+            'error': 'Could not fetch payment details',
+            'details': str(e)
+        }), 502
+
+    # if not captured, record failure only
+    if payment.get('status') != 'captured':
+        dynamodb.save_failed_payment_history({
+            'payment_id':      payment_id,
+            'order_id':        order_id,
+            'amount':          amount,
+            'status':          payment.get('status'),
+            'error_code':      payment.get('error_code'),
+            'error_desc':      payment.get('error_description'),
+            'user_email':      user_email,
+            'plan_id':         plan_id,
+            'created_at':      created_at
+        })
+        return jsonify({
+            'status':  'failure',
+            'message': f"Payment not captured (status={payment.get('status')})",
             'payment': payment
+        }), 402
+
+    # ——— at this point status == 'captured' ———
+    try:
+        result = dynamodb.save_successful_payment({
+            'payment_id': payment_id,
+            'order_id':   order_id,
+            'amount':     amount,
+            'signature':  signature,
+            'created_at': created_at,
+            'user_email': user_email,
+            'plan_id':    plan_id
+        })
+        return jsonify({
+            'status':  'success',
+            'message': 'Payment verified and saved',
+            'payment': payment,
+            'db':      result
         }), 200
 
     except Exception as e:
         return jsonify({
-            'error': 'Failed to process payment',
+            'error':   'Failed to save payment & update user',
             'details': str(e)
         }), 500
 
+
+
+
+@app.route('/delete-payment-fields', methods=['DELETE'])
+@jwt_required()
+def delete_payment_fields():
+    # 1) grab email from the validated JWT
+    email = get_jwt_identity()
+
+    try:
+        # 2) delete those attributes
+        result = dynamodb.delete_user_payment_fields(email)
+        return jsonify(result), 200
+
+    except RuntimeError as err:
+        # could also catch / log more specifics
+        return jsonify({
+            'status': 'error',
+            'message': str(err)
+        }), 500
+    
 
 @app.route('/payment-history/<string:user_id>', methods=['GET'])
 @jwt_required()
