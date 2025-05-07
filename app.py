@@ -430,8 +430,12 @@ def complete_razorpay_order():
     signature = data.get('signature')
     amount = data.get('amount')
     created_at = datetime.now().isoformat()
-    user_id = data.get('user_id')
+    user_id = get_jwt_identity()
     plan_id = data.get('plan_id')
+
+    print(payment_id, order_id, signature)
+    print(amount, plan_id)
+    print(user_id)
 
     missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
     if missing:

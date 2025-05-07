@@ -36,7 +36,7 @@ ExamTable = dynamodb_resource.Table('Exam')
 ModuleTable = dynamodb_resource.Table('Module')
 QNAHistoryTable = dynamodb_resource.Table('QNAHistory')
 QuestionTable = dynamodb_resource.Table('Questions')
-PaymentHistoryTable = dynamodb_resource.Table('PaymentHistory')
+PaymentHistoryTable = dynamodb_resource.Table('PaymentHistoryTable')
 
 def generate_id(size=6):
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(size))
@@ -664,6 +664,7 @@ def save_payment_history(payment_data: dict) -> dict:
     """
     Save payment details to PaymentHistoryTable
     """
+    print(payment_data)
     try:
         response = PaymentHistoryTable.put_item(
             Item={
