@@ -48,7 +48,7 @@ app.config['JWT_TOKEN_LOCATION'] = ['cookies']
 app.config['JWT_ACCESS_COOKIE_PATH'] = '/'
 app.config['JWT_REFRESH_COOKIE_PATH'] = '/refresh'
 app.config['JWT_COOKIE_SECURE'] = True       # Set to True in production
-app.config['JWT_COOKIE_SAMESITE'] = 'Lax'
+app.config['JWT_COOKIE_SAMESITE'] = 'Strict'
 app.config['JWT_COOKIE_CSRF_PROTECT'] = False # Enable & handle CSRF for stronger protection
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)  # Set token expiry to 1 day
 
