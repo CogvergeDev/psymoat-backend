@@ -375,7 +375,7 @@ def logout():
 
 
 
-@app.route('/razorpay/order/create/', methods=['POST'])
+@app.route('/razorpay/order/create', methods=['POST'])
 @jwt_required()
 def create_razorpay_order():
     # Parse & validate JSON
@@ -433,7 +433,7 @@ def create_razorpay_order():
     # Success
     return jsonify({'data': razorpay_order}), 200
 
-@app.route('/razorpay/order/complete/', methods=['POST'])
+@app.route('/razorpay/order/complete', methods=['POST'])
 @jwt_required()
 def complete_razorpay_order():
     try:
