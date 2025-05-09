@@ -67,6 +67,19 @@ def test():
     print("TEST SUCCESS")
     return 'TEST SUCCESS', 200
 
+@app.route('/check-auth')
+@jwt_required()
+def check_auth():
+    try: 
+        email = get_jwt_identity()
+        if email:  
+            return "User is authenticated", 200
+        else:
+            return "Unauthorized", 401
+    except Exception as e:
+        return f"Error Occured: {e}", 500
+
+
 
 # TABLE CREATION ROUTES
 @app.route('/create-user-table')
