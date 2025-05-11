@@ -4,7 +4,7 @@ import os
 import secrets
 import string
 from boto3 import resource
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import BotoCoreError, ClientError
 from flask import jsonify
 from flask_bcrypt import Bcrypt
@@ -20,6 +20,8 @@ from datetime import datetime
 import logging
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
+import random
+
 
 # define IST timezone
 IST = ZoneInfo("Asia/Kolkata")
@@ -44,6 +46,7 @@ ModuleTable = dynamodb_resource.Table('Module')
 QNAHistoryTable = dynamodb_resource.Table('QNAHistory')
 QuestionTable = dynamodb_resource.Table('Questions')
 PaymentHistoryTable = dynamodb_resource.Table('PaymentHistoryTable')
+LectureTable = dynamodb_resource.Table('Lecture')
 
 def generate_id(size=6):
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(size))
@@ -101,13 +104,32 @@ def create_video_table():
         BillingMode='PAY_PER_REQUEST'
     )
 
-def create_live_lecture_table():
+def create_lecture_table():
     return dynamodb_resource.create_table(
-        TableName='LiveLecture',
-        KeySchema=[{'AttributeName': 'live_lec_id', 'KeyType': 'HASH'}],
-        AttributeDefinitions=[{'AttributeName': 'live_lec_id', 'AttributeType': 'S'}],
-        BillingMode='PAY_PER_REQUEST'
+        TableName='Lecture',
+        KeySchema=[
+            {'AttributeName': 'lecture_id', 'KeyType': 'HASH'}
+        ],
+        AttributeDefinitions=[
+            {'AttributeName': 'lecture_id', 'AttributeType': 'S'},
+            {'AttributeName': 'exam_id', 'AttributeType': 'S'},
+            {'AttributeName': 'date_time_of_zoom_lec', 'AttributeType': 'S'}
+        ],
+        BillingMode='PAY_PER_REQUEST',
+        GlobalSecondaryIndexes=[
+            {
+                'IndexName': 'ExamUpcomingLecturesIndex',
+                'KeySchema': [
+                    {'AttributeName': 'exam_id', 'KeyType': 'HASH'},
+                    {'AttributeName': 'date_time_of_zoom_lec', 'KeyType': 'RANGE'}
+                ],
+                'Projection': {
+                    'ProjectionType': 'ALL'
+                }
+            }
+        ]
     )
+
 
 def create_question_table():
     return dynamodb_resource.create_table(
@@ -882,3 +904,241 @@ def get_wrong_questions(user_id: str, module_id: str, idx: int) -> list:
 
     except Exception as e:
         raise RuntimeError(f"Failed to fetch wrong questions: {e}")
+
+
+
+def create_lecture(yt_link, category, title,
+                   instructor_details, key_topics,
+                   description, zoom_link, date_time_of_zoom_lec,
+                   module_id, exam_id):
+    """
+    Inserts a new lecture record into DynamoDB and updates the corresponding module's lectures list.
+    Returns the generated lecture_id.
+    """
+
+    lecture_id = generate_id()
+
+    # ✅ Normalize date_time_of_zoom_lec to ISO8601 format
+    if isinstance(date_time_of_zoom_lec, datetime):
+        date_str = date_time_of_zoom_lec.replace(microsecond=0).isoformat()
+    elif isinstance(date_time_of_zoom_lec, str):
+        try:
+            # Try parsing string to datetime
+            parsed_date = datetime.fromisoformat(date_time_of_zoom_lec)
+            date_str = parsed_date.replace(microsecond=0).isoformat()
+        except ValueError:
+            raise ValueError("date_time_of_zoom_lec must be a valid ISO8601 string or datetime object.")
+    else:
+        raise TypeError("date_time_of_zoom_lec must be a datetime object or ISO8601 string.")
+
+    item = {
+        'lecture_id': lecture_id,
+        'yt_link': yt_link,
+        'category': category,
+        'title': title,
+        'instructor_details': instructor_details,
+        'key_topics': key_topics,
+        'description': description,
+        'zoom_link': zoom_link,
+        'date_time_of_zoom_lec': date_str,
+        'module_id': module_id,
+        'exam_id': exam_id,
+        'created_at': datetime.utcnow().replace(microsecond=0).isoformat()
+    }
+
+    try:
+        # ✅ Insert lecture into LectureTable
+        try:
+            LectureTable.put_item(Item=item)
+        except Exception as e:
+            raise RuntimeError(f"Failed to write new lecture to DynamoDB: {e}") 
+
+        # ✅ Append lecture_id to module's lectures array
+        try:
+            ModuleTable.update_item(
+                Key={'module_id': module_id},
+                UpdateExpression="SET lectures = list_append(if_not_exists(lectures, :empty_list), :lecture_id_list)",
+                ExpressionAttributeValues={
+                    ':lecture_id_list': [lecture_id],
+                    ':empty_list': []
+                }
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to write lecture_id to ModuleTable: {e}") 
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to write to DynamoDB: {e}")
+
+    return lecture_id
+
+def get_lecture_by_id(lecture_id):
+    """
+    Fetches a single lecture from DynamoDB by lecture_id.
+    Raises RuntimeError if not found or if DynamoDB fails.
+    """
+    try:
+        response = LectureTable.get_item(Key={'lecture_id': lecture_id})
+        item = response.get('Item')
+        if not item:
+            raise RuntimeError(f"Lecture with id '{lecture_id}' not found.")
+        return item
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to fetch from DynamoDB: {e}")
+
+
+
+
+
+def get_random_lectures_from_module(module_id, count=5):
+    """
+    Fetches module by module_id, randomly picks `count` lecture_ids,
+    and returns selected lecture summaries.
+    """
+    try:
+        # Step 1: Get module
+        response = ModuleTable.get_item(Key={'module_id': module_id})
+        module_item = response.get('Item')
+        if not module_item or 'lectures' not in module_item or not module_item['lectures']:
+            raise RuntimeError(f"Module with id '{module_id}' not found or has no lectures.")
+
+        lecture_ids = module_item['lectures']
+        if len(lecture_ids) < count:
+            count = len(lecture_ids)
+
+        # Step 2: Randomly select unique lecture_ids
+        selected_ids = random.sample(lecture_ids, count)
+
+        # Step 3: Fetch lecture details
+        lectures = []
+        for lecture_id in selected_ids:
+            response = LectureTable.get_item(Key={'lecture_id': lecture_id})
+            lecture = response.get('Item')
+            if lecture:
+                lectures.append({
+                    'lecture_id': lecture.get('lecture_id'),
+                    'title': lecture.get('title'),
+                    'category': lecture.get('category'),
+                    'instructor_details': lecture.get('instructor_details'),
+                    'duration': lecture.get('duration', None),  # duration may not exist
+                    'yt_link': lecture.get('yt_link')
+                })
+
+        return lectures
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB operation failed: {e}")
+    
+
+
+
+def get_upcoming_lectures_for_exam(exam_id):
+    """
+    Query GSI to return upcoming lectures (today or future) for a given exam_id.
+    """
+    try:
+        now_iso = datetime.utcnow().isoformat()
+
+        response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',   # Your GSI name
+            KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('date_time_of_zoom_lec').gte(now_iso),
+        )
+
+        items = response.get('Items', [])
+
+        lectures = []
+        for lecture in items:
+            lectures.append({
+                'lecture_id': lecture.get('lecture_id'),
+                'title': lecture.get('title'),
+                'category': lecture.get('category'),
+                'instructor_details': lecture.get('instructor_details'),
+                'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
+                'yt_link': lecture.get('yt_link')
+            })
+
+        return lectures
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB query failed: {e}")
+
+
+def get_past_lectures_for_exam(exam_id):
+    """
+    Query GSI to return past lectures (before today) for a given exam_id.
+    """
+    try:
+        now_iso = datetime.utcnow().isoformat()
+
+        response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',   # Same GSI
+            KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('date_time_of_zoom_lec').lt(now_iso),
+        )
+
+        items = response.get('Items', [])
+
+        lectures = []
+        for lecture in items:
+            lectures.append({
+                'lecture_id': lecture.get('lecture_id'),
+                'title': lecture.get('title'),
+                'category': lecture.get('category'),
+                'instructor_details': lecture.get('instructor_details'),
+                'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
+                'yt_link': lecture.get('yt_link')
+            })
+
+        return lectures
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB query failed: {e}")
+
+
+def get_lecture_dashboard_details(exam_id):
+    """
+    Returns 2 upcoming and 2 past lectures for given exam_id.
+    """
+    try:
+        now_iso = datetime.utcnow().isoformat()
+
+        # Upcoming lectures (future dates)
+        upcoming_response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',
+            KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('date_time_of_zoom_lec').gte(now_iso),
+            Limit=2,
+            ScanIndexForward=True  # upcoming first
+        )
+        upcoming_items = upcoming_response.get('Items', [])
+        upcoming = [{
+            'lecture_id': lec.get('lecture_id'),
+            'title': lec.get('title'),
+            'category': lec.get('category'),
+            'instructor_details': lec.get('instructor_details'),
+            'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
+            'yt_link': lec.get('yt_link')
+        } for lec in upcoming_items]
+
+        # Past lectures (older dates)
+        past_response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',
+            KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('date_time_of_zoom_lec').lt(now_iso),
+            Limit=2,
+            ScanIndexForward=False  # latest past first
+        )
+        past_items = past_response.get('Items', [])
+        past = [{
+            'lecture_id': lec.get('lecture_id'),
+            'title': lec.get('title'),
+            'category': lec.get('category'),
+            'instructor_details': lec.get('instructor_details'),
+            'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
+            'yt_link': lec.get('yt_link')
+        } for lec in past_items]
+
+        return {
+            'upcoming_lectures': upcoming,
+            'past_lectures': past
+        }
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB query failed: {e}")

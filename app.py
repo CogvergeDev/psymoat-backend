@@ -7,6 +7,7 @@ import controller as dynamodb
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from flask_cors import CORS
 from dotenv import load_dotenv
+from botocore.exceptions import BotoCoreError, ClientError
 import razorpay
 from razorpay.errors import BadRequestError, ServerError as RazorpayServerError, SignatureVerificationError
 from uuid import uuid4
@@ -107,9 +108,9 @@ def create_test_table_route():
     dynamodb.create_test_table()
     return 'Test Table created', 200
 
-@app.route('/create-live-lec-table')
-def create_live_lec_table_route():
-    dynamodb.create_live_lecture_table()
+@app.route('/create-lec-table')
+def create_lec_table_route():
+    dynamodb.create_lecture_table()
     return 'Live Lecture Table created', 200
 
 @app.route('/create-video-table')
@@ -585,6 +586,213 @@ def get_exam_module_statistics():
         return jsonify({'error': str(e)}), 404
     except Exception as e:
         return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
+
+
+
+@app.route('/add-new-lecture', methods=['POST'])
+def add_new_lecture():
+    try:
+        data = request.get_json(force=True)
+
+        required_fields = [
+            'yt_link', 'category', 'title', 'instructor_details',
+            'key_topics', 'description', 'zoom_link',
+            'date_time_of_zoom_lec', 'exam_id', 'module_id'
+        ]
+
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return jsonify({
+                'status': 'error',
+                'message': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+
+        lecture_id = dynamodb.create_lecture(
+            yt_link=data['yt_link'],
+            category=data['category'],
+            title=data['title'],
+            instructor_details=data['instructor_details'],
+            key_topics=data['key_topics'],
+            description=data['description'],
+            zoom_link=data['zoom_link'],
+            date_time_of_zoom_lec=data['date_time_of_zoom_lec'],
+            exam_id=data['exam_id'],
+            module_id=data['module_id']
+        )
+
+        return jsonify({
+            'status': 'success',
+            'lecture_id': lecture_id
+        }), 201
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Database operation failed: {str(e)}'
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+    
+@app.route('/get-lecture/<string:lecture_id>', methods=['GET'])
+def get_lecture(lecture_id):
+    try:
+        lecture = dynamodb.get_lecture_by_id(lecture_id)
+
+        return jsonify({
+            'status': 'success',
+            'lecture': lecture
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 404
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/get-random-lectures/<string:module_id>', methods=['GET'])
+def get_random_module_lectures(module_id):
+    try:
+        lectures = dynamodb.get_random_lectures_from_module(module_id)
+
+        return jsonify({
+            'status': 'success',
+            'lectures': lectures
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 404
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+
+@app.route('/get-all-upcoming-lectures/<string:exam_id>', methods=['GET'])
+def get_upcoming_lectures_for_exam(exam_id):
+    try:
+        lectures = dynamodb.get_upcoming_lectures_for_exam(exam_id)
+
+        return jsonify({
+            'status': 'success',
+            'upcoming_lectures': lectures
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/get-all-past-lectures/<string:exam_id>', methods=['GET'])
+def get_past_lectures_for_exam(exam_id):
+    try:
+        lectures = dynamodb.get_past_lectures_for_exam(exam_id)
+
+        return jsonify({
+            'status': 'success',
+            'past_lectures': lectures
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/get-lecture-dashboard-details', methods=['POST'])
+def get_lecture_dashboard_details_route():
+    try:
+        data = request.get_json(force=True)
+        exam_id = data.get('exam_id')
+
+        if not exam_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing required parameter: exam_id'
+            }), 400
+
+        dashboard = dynamodb.get_lecture_dashboard_details(exam_id)
+
+        return jsonify({
+            'status': 'success',
+            'dashboard': dashboard
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
