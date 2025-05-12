@@ -21,6 +21,9 @@ import logging
 from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 import random
+import csv
+from io import StringIO
+
 
 
 # define IST timezone
@@ -47,6 +50,8 @@ QNAHistoryTable = dynamodb_resource.Table('QNAHistory')
 QuestionTable = dynamodb_resource.Table('Questions')
 PaymentHistoryTable = dynamodb_resource.Table('PaymentHistoryTable')
 LectureTable = dynamodb_resource.Table('Lecture')
+MockTestTable = dynamodb_resource.Table('MockTest')
+TestsSolvedUserDataTable = dynamodb_resource.Table('TestsSolvedUserData')
 
 def generate_id(size=6):
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(size))
@@ -63,6 +68,24 @@ def create_user_table():
         AttributeDefinitions=[{'AttributeName': 'email', 'AttributeType': 'S'}],
         ProvisionedThroughput={'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
     )
+
+def create_mock_test_table():
+    return dynamodb_resource.create_table(
+        TableName='MockTest',
+        KeySchema=[{'AttributeName': 'test_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'test_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
+
+def create_test_solved_table():
+    return dynamodb_resource.create_table(
+        TableName='TestsSolvedUserData',
+        KeySchema=[{'AttributeName': 'email', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'email', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
 
 def create_exam_table():
     return dynamodb_resource.create_table(
@@ -1142,3 +1165,223 @@ def get_lecture_dashboard_details(exam_id):
 
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"DynamoDB query failed: {e}")
+
+def create_mock_test(data, csv_file):
+    """
+    data: dict with all fields except test_id, total_marks, questions
+    csv_file: FileStorage for uploaded CSV with columns:
+      Question, Option 1, Option 2, Option 3, Option 4,
+      Correct Answer, difficulty, explanation, marks
+    """
+    # 1) Generate test_id 
+    test_id = generate_id()
+
+    # 2) Read & decode CSV
+    try:
+        raw = csv_file.read()
+        text = raw.decode("utf-8")
+    except Exception as e:
+        raise ValueError(f"Failed to read or decode CSV file: {e}")
+
+    # 3) Initialize CSV reader
+    try:
+        reader = csv.DictReader(StringIO(text))
+    except Exception as e:
+        raise ValueError(f"Error initializing CSV reader: {e}")
+
+    questions = []
+    total_marks = 0
+    row_num = 0
+
+    # 4) Process each row
+    for row in reader:
+        row_num += 1
+        try:
+            # a) Question text
+            question_text = row.get("Question", "").strip()
+            if not question_text:
+                raise ValueError("missing 'Question' column")
+
+            # b) Options 1–4
+            opts = []
+            for col in ["Option 1", "Option 2", "Option 3", "Option 4"]:
+                val = row.get(col, "").strip()
+                if val:
+                    opts.append(val)
+            if not opts:
+                raise ValueError("no options found in columns Option 1–4")
+
+            # c) Correct Answer
+            correct = row.get("Correct Answer", "").strip()
+            if not correct:
+                raise ValueError("missing 'Correct Answer' column")
+
+            # d) Marks
+            marks_str = row.get("marks", row.get("Marks", "")).strip()
+            marks = int(marks_str) if marks_str else 0
+            total_marks += marks
+
+            # e) Difficulty & Explanation (optional)
+            difficulty  = row.get("difficulty", row.get("Difficulty", "")).strip()
+            explanation = row.get("explanation", row.get("explaination", row.get("Explanation", ""))).strip()
+
+            # f) Append to list
+            questions.append({
+                "test_question_id": f"{test_id}_question_{row_num}",
+                "question":       question_text,
+                "options":        opts,
+                "correct_answer": correct,
+                "difficulty":     difficulty,
+                "explanation":    explanation,
+                "marks":          marks
+            })
+
+        except Exception as e:
+            raise ValueError(f"Error processing CSV row {row_num}: {e}")
+
+    # 5) Optional sanity‐check: no_of_questions matches
+    expected = int(data.get("no_of_questions", len(questions)))
+    if expected != len(questions):
+        raise ValueError(f"no_of_questions mismatch: expected {expected}, got {len(questions)} rows")
+
+    # 6) Build the item
+    item = {
+        "test_id":            test_id,
+        "title":              data["title"],
+        "duration":           int(data["duration"]),
+        "no_of_questions":    len(questions),
+        "difficulty":         data["difficulty"],
+        "is_featured_test":   data["is_featured_test"],
+        "description":        data["description"],
+        "exam_id":            data["exam_id"],
+        "is_modulewise_test": data["is_modulewise_test"],
+        "module_id":          data.get("module_id"),
+        "total_marks":        total_marks,
+        "questions":          questions
+    }
+
+    # 7) Persist to DynamoDB
+    try:
+        MockTestTable.put_item(Item=item)
+    except Exception as e:
+        raise RuntimeError(f"Failed to write to MockTests table: {e}")
+
+    return item
+
+
+def get_mock_test(test_id):
+    """
+    Fetches a mock test by its test_id from DynamoDB.
+    Raises:
+      KeyError   – if no test with that ID exists
+      RuntimeError – on any underlying DynamoDB error
+    """
+    try:
+        resp = MockTestTable.get_item(Key={"test_id": test_id})
+    except Exception as e:
+        raise RuntimeError(f"Error fetching test from DB: {e}")
+
+    item = resp.get("Item")
+    if not item:
+        raise KeyError(f"No mock test found with test_id='{test_id}'")
+
+    return item
+
+
+
+
+def submit_mock_test_controller(user_email, data):
+    try:
+        request_email = data.get('email')
+        if user_email != request_email:
+            return {"msg": "Unauthorized. Email mismatch."}, 401
+
+        # Check if user exists in TestsSolvedUserDataTable
+        response = TestsSolvedUserDataTable.get_item(Key={'email': user_email})
+        item = response.get('Item')
+
+        if item:
+            # User exists -> append to tests_submitted
+            try:
+                TestsSolvedUserDataTable.update_item(
+                    Key={'email': user_email},
+                    UpdateExpression="SET tests_submitted = list_append(if_not_exists(tests_submitted, :empty_list), :new_test)",
+                    ExpressionAttributeValues={
+                        ':new_test': [data],
+                        ':empty_list': []
+                    }
+                )
+            except ClientError as e:
+                return {"msg": "Failed to update TestsSolvedUserDataTable", "error": str(e)}, 500
+        else:
+            # User does not exist -> create new item
+            try:
+                TestsSolvedUserDataTable.put_item(Item={
+                    'email': user_email,
+                    'tests_submitted': [data]
+                })
+            except ClientError as e:
+                return {"msg": "Failed to create item in TestsSolvedUserDataTable", "error": str(e)}, 500
+
+        # Update UserTable
+        user_update_item = {
+            'test_id': data.get('test_id'),
+            'marks_scored': data.get('marks_scored'),
+            'total_marks': data.get('total_marks'),
+            'exam_id': data.get('exam_id'),
+            'timestamp': data.get('timestamp')
+        }
+
+        try:
+            UserTable.update_item(
+                Key={'email': user_email},
+                UpdateExpression="SET tests_submitted = list_append(if_not_exists(tests_submitted, :empty_list), :new_entry)",
+                ExpressionAttributeValues={
+                    ':new_entry': [user_update_item],
+                    ':empty_list': []
+                }
+            )
+        except ClientError as e:
+            return {"msg": "Failed to update UserTable", "error": str(e)}, 500
+
+        return {"msg": "Mock test submitted successfully."}, 200
+
+    except Exception as e:
+        return {"msg": "An unexpected error occurred", "error": str(e)}, 500
+    
+
+
+    # controller.py (add this)
+def get_test_dashboard_controller(exam_id):
+    try:
+        MockTestTable = dynamodb_resource.Table('MockTestTable')
+
+        # Scan with filter on exam_id
+        response = MockTestTable.scan(
+            FilterExpression='exam_id = :exam_id_val',
+            ExpressionAttributeValues={':exam_id_val': exam_id}
+        )
+
+        items = response.get('Items', [])
+
+        # Only return selected fields
+        tests = []
+        for item in items:
+            test_data = {
+                'title': item.get('title'),
+                'difficulty': item.get('difficulty'),
+                'duration': item.get('duration'),
+                'no_of_questions': item.get('no_of_questions'),
+                'exam_id': item.get('exam_id'),
+                'test_id': item.get('test_id'),
+                "is_featured_test": item.get('is_featured_test'),
+                "is_modulewise_test": item.get('is_modulewise_test')
+            }
+            tests.append(test_data)
+
+        return {"tests": tests}, 200
+
+    except ClientError as e:
+        return {"msg": "Failed to query MockTestTable", "error": str(e)}, 500
+    except Exception as e:
+        return {"msg": "An unexpected error occurred", "error": str(e)}, 500

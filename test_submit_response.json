@@ -1,8 +1,7 @@
 {
     "email": "email",
-    "module_id" : "module_id",
+    "test_id" : "test_id",
     "exam_id" : "exam_id",
-    "completed_idx": 2,
     "easy_correct" : 3,
     "medium_correct" : 3,
     "hard_correct" : 3,
@@ -11,9 +10,12 @@
     "hard_incorrect" : 3,
     "wrong_answers_qid" : ["qid1", "qid2"],
     "correct_answers_qid" : ["qid1", "qid2"],
+    "timestamp": "timestamp",
+    "total_marks": 100,
+    "marks_scored": 50,
 
 
-    "detailed_user_qna" : [
+    "detailed_user_test_qna" : [
         {
             "question_id" : "question_id",
             "question": "question",
@@ -41,5 +43,3 @@
         
     ]
 }
-
-

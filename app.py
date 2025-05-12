@@ -88,6 +88,16 @@ def create_user_table_route():
     dynamodb.create_user_table()
     return 'User Table created', 200
 
+@app.route('/create-tests-solved-table')
+def create_tests_table_route():
+    dynamodb.create_test_solved_table()
+    return 'TestsSolved Table created', 200
+
+@app.route('/create-mock-test-table')
+def create_mock_test_table_route():
+    dynamodb.create_mock_test_table()
+    return 'MockTest Table created', 200
+
 @app.route('/create-questions-table')
 def create_question_table_route():
     dynamodb.create_question_table()
@@ -268,6 +278,7 @@ def add_to_module(module_id):
         "freeQuestions": result.get('numberOfFreeQuestions'),
         "allQuestionIds": result.get('questions', [])
     }), 200
+
 
 @app.route('/get-questions/<string:module_id>/<string:question_type>/<int:idx>')
 @jwt_required()
@@ -793,6 +804,99 @@ def get_lecture_dashboard_details_route():
             'message': f'Internal server error: {str(e)}'
         }), 500
 
+
+@app.route("/create-new-mock-test", methods=["POST"])
+def create_mock_test_route():
+    # 1) Validate presence of all required fields
+    required = [
+        "title",
+        "duration",
+        "no_of_questions",
+        "difficulty",
+        "is_featured_test",
+        "description",
+        "exam_id",
+        "is_modulewise_test"
+    ]
+    missing = [f for f in required if f not in request.form]
+    if missing:
+        return jsonify({"error": f"Missing required field(s): {', '.join(missing)}"}), 400
+
+    # 2) Grab the CSV
+    csv_file = request.files.get("csv_file")
+    if not csv_file:
+        return jsonify({"error": "CSV file (csv_file) is required"}), 400
+
+    # 3) Helper to coerce booleans
+    def parse_bool(val):
+        if isinstance(val, bool):
+            return val
+        return val.strip().lower() in ("true", "1", "yes")
+
+    # 4) Collect & convert the form data
+    data = {
+        "title":            request.form["title"],
+        "duration":         request.form["duration"],
+        "no_of_questions":  request.form["no_of_questions"],
+        "difficulty":       request.form["difficulty"],
+        "is_featured_test": parse_bool(request.form["is_featured_test"]),
+        "description":      request.form["description"],
+        "exam_id":          request.form["exam_id"],
+        "is_modulewise_test": parse_bool(request.form["is_modulewise_test"]),
+        "module_id":        request.form.get("module_id")
+    }
+
+    # 5) Delegate to controller
+    try:
+        new_test = dynamodb.create_mock_test(data, csv_file)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    # 6) Return the freshly created record
+    return jsonify(new_test), 201
+
+
+@app.route("/get-mock-test/<string:test_id>", methods=["GET"])
+def fetch_mock_test_route(test_id):
+    if not test_id:
+        return jsonify({"error": "test_id is required in the URL"}), 400
+
+    try:
+        mock_test = dynamodb.get_mock_test(test_id)
+    except KeyError as e:
+        # not found
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        # any other error
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(mock_test), 200
+
+
+@app.route('/submit-mock-test', methods=['POST'])
+@jwt_required()
+def submit_mock_test():
+    try:
+        user_email = get_jwt_identity()
+        data = request.get_json()
+
+        if not data:
+            return jsonify({"msg": "No data provided"}), 400
+
+        result, status_code = dynamodb.submit_mock_test_controller(user_email, data)
+        return jsonify(result), status_code
+
+    except Exception as e:
+        return jsonify({"msg": "Server error", "error": str(e)}), 500
+
+
+@app.route('/get-test-dashboard/<string:exam_id>', methods=['GET'])
+def get_test_dashboard(exam_id):
+    try:
+        result, status_code = dynamodb.get_test_dashboard_controller(exam_id)
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({"msg": "Server error", "error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
