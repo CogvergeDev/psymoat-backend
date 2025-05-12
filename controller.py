@@ -257,7 +257,7 @@ def add_questions_to_module(module_id: str, rows: list, paid_count: int, free_co
         new_ids = []
         for row in rows:
             # Validate required fields
-            required_fields = ['Question', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Correct Answer']
+            required_fields = ['Question', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Answer']
             missing = [f for f in required_fields if not row.get(f)]
             if missing:
                 raise ValueError(f"Missing required fields: {', '.join(missing)}")
@@ -277,7 +277,7 @@ def add_questions_to_module(module_id: str, rows: list, paid_count: int, free_co
                     row['Option 3'].strip(),
                     row['Option 4'].strip()
                 ],
-                'correct_answer': row['Correct Answer'].strip(),
+                'correct_answer': row['Answer'].strip(),
                 'explanation': row.get('Explanation', '').strip(),
                 'difficulty': row.get('Difficulty', 'Medium').strip(),
                 'is_paid': row['is_paid']
@@ -872,6 +872,7 @@ def get_exam_module_stats(exam_id: str, user_id: str) -> dict:
             if 'Item' in module_resp:
                 module_data = module_resp['Item']
                 module_data['numberOfWrongQuestions'] = len(wrong_questions.get(module_id, []))
+                module_data['module_id'] = module_id
                 modules_stats.append(module_data)
         
         return {
@@ -883,6 +884,8 @@ def get_exam_module_stats(exam_id: str, user_id: str) -> dict:
         raise RuntimeError(f"DynamoDB error: {e}")
     except Exception as e:
         raise RuntimeError(f"Unexpected error: {e}")
+
+
 
 def get_wrong_questions(user_id: str, module_id: str, idx: int) -> list:
     """
@@ -1212,13 +1215,13 @@ def create_mock_test(data, csv_file):
                 raise ValueError("no options found in columns Option 1–4")
 
             # c) Correct Answer
-            correct = row.get("Correct Answer", "").strip()
+            correct = row.get("Answer", "").strip()
             if not correct:
-                raise ValueError("missing 'Correct Answer' column")
+                raise ValueError("missing 'Answer' column")
 
             # d) Marks
             marks_str = row.get("marks", row.get("Marks", "")).strip()
-            marks = int(marks_str) if marks_str else 0
+            marks = int(marks_str) if marks_str else 1
             total_marks += marks
 
             # e) Difficulty & Explanation (optional)
@@ -1354,8 +1357,6 @@ def submit_mock_test_controller(user_email, data):
     # controller.py (add this)
 def get_test_dashboard_controller(exam_id):
     try:
-        MockTestTable = dynamodb_resource.Table('MockTestTable')
-
         # Scan with filter on exam_id
         response = MockTestTable.scan(
             FilterExpression='exam_id = :exam_id_val',

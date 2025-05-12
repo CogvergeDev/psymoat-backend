@@ -246,7 +246,7 @@ def add_to_module(module_id):
 
     for row in rows:
         # parse the incoming "isPaid" column
-        is_paid = row.get('isPaid', '').strip().lower() == 'true'
+        is_paid = row.get('isPaid', '').strip().lower() == 'T'
         row['is_paid'] = is_paid
 
         # pick the right counter and suffix
