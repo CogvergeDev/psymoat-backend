@@ -425,6 +425,7 @@ def create_razorpay_order():
             'payment_capture': 1
         })
     except BadRequestError as e:
+        print("YE AYA")
         # client-side issue (e.g. unsupported currency)
         return jsonify({
             'error': 'Razorpay order creation failed (BadRequest)',

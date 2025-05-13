@@ -23,6 +23,10 @@ from zoneinfo import ZoneInfo
 import random
 import csv
 from io import StringIO
+import math
+from decimal import Decimal
+
+
 
 
 
@@ -358,85 +362,119 @@ def count_questions_by_difficulty(module_id: str, difficulty: str) -> int:
         raise RuntimeError(
             f"Error counting {difficulty} questions for module {module_id}: {e}"
         )
+def get_likelyhood_clearing_value(
+    easy, hard, incorrect,
+    B1=0.1, B2=0.25,
+    E=3.0,
+    scale=38, ceiling=90
+):
+    # ── 0) normalize types ───────────────────────────────────────────────
+    easy      = float(easy)
+    hard      = float(hard)
+    incorrect = float(incorrect)
+
+    # ── 1) entry diagnostics ─────────────────────────────────────────────
+
+    # ── 2) total attempts ────────────────────────────────────────────────
+    total_attempts = easy + hard + incorrect
+    if total_attempts == 0:
+        return 0
+
+    # ── 3) raw score ────────────────────────────────────────────────────
+    raw_score = B1 * easy + B2 * hard
+
+    # ── 4) error penalty ────────────────────────────────────────────────
+    error_rate    = incorrect / total_attempts
+    error_penalty = -E * error_rate * math.sqrt(total_attempts)
+
+    # ── 5) floor at zero ────────────────────────────────────────────────
+    adjusted_score = max(raw_score + error_penalty, 0)
+
+    # ── 6) exponential mapping ──────────────────────────────────────────
+    score = ceiling * (1 - math.exp(-adjusted_score / scale))
+
+    return score
+
 
 def submit_questions(data, user):
     exam_id   = data["exam_id"]
     module_id = data["module_id"]
 
-    # ─── 1. mark exam as taken ─────────────────────────────────────────────────────
+    # ─── 1. mark exam as taken ────────────────────────────────────────────────
     if exam_id not in user.setdefault("examsTaken", []):
         user["examsTaken"].append(exam_id)
 
-    # ─── 2. update completed_idx ──────────────────────────────────────────────────
+    # ─── 2. update completed_idx ─────────────────────────────────────────────
     user.setdefault("completed_idx", {})
     user["completed_idx"].setdefault(exam_id, {})
     user["completed_idx"][exam_id].setdefault(module_id, [])
-
     module_data   = user["completed_idx"][exam_id][module_id]
     completed_idx = data["completed_idx"]
-
     try:
         if completed_idx not in module_data:
             module_data.append(completed_idx)
     except Exception as e:
         print(f"ERROR IN UPDATING COMPLETED IDX: {e}")
 
-    # ─── 3. updating data_graph_leetcode_accuracy ────────────────────────────────
+    # ─── 3. updating data_graph_leetcode_accuracy ────────────────────────────
     user.setdefault("data_graph_leetcode_accuracy", {})
     user["data_graph_leetcode_accuracy"].setdefault(exam_id, {
-        "easy":   {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Easy'), "correct_answered": 0},
+        "easy":   {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Easy'),   "correct_answered": 0},
         "medium": {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Medium'), "correct_answered": 0},
-        "hard":   {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Hard'), "correct_answered": 0},
+        "hard":   {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Hard'),   "correct_answered": 0},
     })
     graph = user["data_graph_leetcode_accuracy"][exam_id]
-
+    total_incorrect_for_likelyhood = 0
     for level in ("easy", "medium", "hard"):
         correct   = data.get(f"{level}_correct", 0)
         incorrect = data.get(f"{level}_incorrect", 0)
         solved    = correct + incorrect
-
         graph[level]["number_solved"]    += solved
         graph[level]["correct_answered"] += correct
+        total_incorrect_for_likelyhood   += (graph[level]["number_solved"] - graph[level]["correct_answered"])
 
-    # ─── 4. updating data_graph_modulewise ────────────────────────────────────────
-    # totalQuestionRef = get_module_no_of_questions(module_id)
-    # totalQuestions = totalQuestionRef['Item']['numberOfQuestions']
+    # compute and normalize your score
+    raw_lcv = get_likelyhood_clearing_value(
+        graph['easy']["correct_answered"],
+        graph['hard']["correct_answered"],
+        total_incorrect_for_likelyhood
+    )
+    # convert to Decimal so DynamoDB will accept it
+    likelyhood_clearing_value = Decimal(str(raw_lcv))
+    user["likelyhood_clearing_value"] = likelyhood_clearing_value
+
+    # ─── 4. updating data_graph_modulewise ───────────────────────────────────
     user.setdefault("data_graph_modulewise", {})
     user["data_graph_modulewise"].setdefault(exam_id, {})
     user["data_graph_modulewise"][exam_id].setdefault(module_id, {
         "correct_answers": 0,
         "total_questions": get_module_no_of_questions_for_init(module_id),
     })
-
     total_correct = sum(data.get(f"{lvl}_correct", 0) for lvl in ("easy", "medium", "hard"))
-
     user["data_graph_modulewise"][exam_id][module_id]["correct_answers"] += total_correct
 
-    # ─── 5. updating solved_wrong ────────────────────────────────────────────────
+    # ─── 5. updating solved_wrong ────────────────────────────────────────────
     user.setdefault("solved_wrong", {})
     user["solved_wrong"].setdefault(exam_id, {})
     user["solved_wrong"][exam_id].setdefault(module_id, [])
-
     wrong_list = user["solved_wrong"][exam_id][module_id]
-
-    # 5a) remove any QIDs the user just got correct
     for qid in data.get("correct_answers_qid", []):
         if qid in wrong_list:
             wrong_list.remove(qid)
-
-    # 5b) add any newly wrong QIDs (no duplicates)
     for qid in data.get("wrong_answers_qid", []):
         if qid not in wrong_list:
             wrong_list.append(qid)
 
-    # ─── 6. save QnA history & persist user ───────────────────────────────────────
+    # ─── 6. save QnA history & persist user ───────────────────────────────────
     try:
         for qna_entry in data.get("detailed_user_qna", []):
-            qna_entry["email"]     = data["email"]
-            qna_entry["qna_id"]    = generate_id(6)
-            qna_entry["exam_id"]   = exam_id
-            qna_entry["module_id"] = module_id
-            qna_entry["timestamp"] = get_time()
+            qna_entry.update({
+                "email":     data["email"],
+                "qna_id":    generate_id(6),
+                "exam_id":   exam_id,
+                "module_id": module_id,
+                "timestamp": get_time()
+            })
             QNAHistoryTable.put_item(Item=qna_entry)
 
         response = UserTable.update_item(
@@ -446,7 +484,8 @@ def submit_questions(data, user):
                 "completed_idx = :c, "
                 "data_graph_leetcode_accuracy = :l, "
                 "data_graph_modulewise = :m, "
-                "solved_wrong = :w"
+                "solved_wrong = :w, "
+                "likelyhood_clearing_value = :lc"
             ),
             ExpressionAttributeValues={
                 ":e": user["examsTaken"],
@@ -454,6 +493,7 @@ def submit_questions(data, user):
                 ":l": user["data_graph_leetcode_accuracy"],
                 ":m": user["data_graph_modulewise"],
                 ":w": user["solved_wrong"],
+                ":lc": likelyhood_clearing_value,
             },
             ReturnValues="UPDATED_NEW"
         )
@@ -461,7 +501,6 @@ def submit_questions(data, user):
         return {"status": "error", "message": f"Error saving QnA or updating user: {e}"}
 
     return response
-
 # DATA OPERATIONS
 def get_module_no_of_questions(module_id):
     res =  ModuleTable.get_item(
