@@ -362,6 +362,36 @@ def count_questions_by_difficulty(module_id: str, difficulty: str) -> int:
         raise RuntimeError(
             f"Error counting {difficulty} questions for module {module_id}: {e}"
         )
+
+
+
+def count_exam_questions_by_difficulty(exam_id: str, difficulty: str) -> int:
+    """
+    Fetches the list of module IDs for the given exam_id from ExamTable,
+    then for each module, counts questions of the given difficulty
+    (using your count_questions_by_difficulty function), and returns the sum.
+    """
+    try:
+        # 1) load exam record
+        resp = ExamTable.get_item(Key={'exam_id': exam_id})
+        exam = resp.get('Item')
+        if not exam or 'modules' not in exam:
+            # no modules found → zero questions
+            raise Exception(f"ERROR modules not found")
+
+        total = 0
+        # 2) for each module, count and accumulate
+        for module_id in exam['modules']:
+            total += count_questions_by_difficulty(module_id, difficulty)
+
+        return total
+
+    except (ClientError, BotoCoreError) as e:
+        raise RuntimeError(
+            f"Error counting {difficulty} questions for exam {exam_id}: {e}"
+        )
+
+
 def get_likelyhood_clearing_value(
     easy, hard, incorrect,
     B1=0.1, B2=0.25,
@@ -419,9 +449,9 @@ def submit_questions(data, user):
     # ─── 3. updating data_graph_leetcode_accuracy ────────────────────────────
     user.setdefault("data_graph_leetcode_accuracy", {})
     user["data_graph_leetcode_accuracy"].setdefault(exam_id, {
-        "easy":   {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Easy'),   "correct_answered": 0},
-        "medium": {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Medium'), "correct_answered": 0},
-        "hard":   {"number_solved": 0, "total_questions": count_questions_by_difficulty(module_id, 'Hard'),   "correct_answered": 0},
+        "easy":   {"number_solved": 0, "total_questions": count_exam_questions_by_difficulty(exam_id, 'Easy'),   "correct_answered": 0},
+        "medium": {"number_solved": 0, "total_questions": count_exam_questions_by_difficulty(exam_id,  'Medium'), "correct_answered": 0},
+        "hard":   {"number_solved": 0, "total_questions": count_exam_questions_by_difficulty(exam_id,  'Hard'),   "correct_answered": 0},
     })
     graph = user["data_graph_leetcode_accuracy"][exam_id]
     total_incorrect_for_likelyhood = 0
