@@ -1455,3 +1455,24 @@ def get_test_dashboard_controller(exam_id):
         return {"msg": "Failed to query MockTestTable", "error": str(e)}, 500
     except Exception as e:
         return {"msg": "An unexpected error occurred", "error": str(e)}, 500
+
+def grant_paid_access(email: str, plan_id: str, plan_valid_till: str) -> dict:
+    """
+    Updates the user in UserTable to set is_paid=True, plan_id=plan_id, and plan_valid_till.
+    """
+    try:
+        resp = UserTable.get_item(Key={'email': email})
+        if 'Item' not in resp:
+            return {'status': 'error', 'message': f'User {email} not found.'}
+        UserTable.update_item(
+            Key={'email': email},
+            UpdateExpression="SET is_paid = :paid, plan_id = :plan_id, plan_valid_till = :plan_valid_till",
+            ExpressionAttributeValues={
+                ':paid': True,
+                ':plan_id': plan_id,
+                ':plan_valid_till': plan_valid_till
+            }
+        )
+        return {'status': 'success', 'message': f'Paid access granted to {email} with plan_id {plan_id}.'}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}

@@ -14,6 +14,7 @@ from uuid import uuid4
 import csv
 from io import StringIO
 from zoneinfo import ZoneInfo
+from dateutil.relativedelta import relativedelta
 
 # define IST timezone
 IST = ZoneInfo("Asia/Kolkata")
@@ -899,6 +900,19 @@ def get_test_dashboard(exam_id):
         return jsonify(result), status_code
     except Exception as e:
         return jsonify({"msg": "Server error", "error": str(e)}), 500
+
+@app.route('/grant-paid-access', methods=['POST'])
+def grant_paid_access_route():
+    data = request.get_json(force=True)
+    email = data.get('email')
+    plan_id = data.get('plan_id')
+    if not email or not plan_id:
+        return jsonify({'status': 'error', 'message': 'email and plan_id are required'}), 400
+    # Calculate plan_valid_till as 1 month from now in UTC ISO format
+    plan_valid_till = (datetime.utcnow() + relativedelta(months=1)).replace(microsecond=0).isoformat() + 'Z'
+    result = dynamodb.grant_paid_access(email, plan_id, plan_valid_till)
+    status = 200 if result.get('status') == 'success' else 404
+    return jsonify(result), status
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
