@@ -1476,3 +1476,16 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str) -> dict:
         return {'status': 'success', 'message': f'Paid access granted to {email} with plan_id {plan_id}.'}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
+
+def get_users_by_plan(plan_id: str) -> list:
+    """
+    Returns a list of users with the given plan_id, including email, is_paid, plan_id, and fullName.
+    """
+    try:
+        response = UserTable.scan(
+            FilterExpression=Attr('plan_id').eq(plan_id),
+            ProjectionExpression="email, is_paid, plan_id, fullName"
+        )
+        return response.get('Items', [])
+    except Exception as e:
+        return []

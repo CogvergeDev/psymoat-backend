@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, Response, request, jsonify
 import controller as dynamodb
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from flask_cors import CORS
@@ -913,6 +913,37 @@ def grant_paid_access_route():
     result = dynamodb.grant_paid_access(email, plan_id, plan_valid_till)
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status
+
+
+@app.route('/export-users-by-plan', methods=['POST'])
+def export_users_by_plan():
+    data = request.get_json(force=True)
+    plan_id = data.get('plan_id')
+    if not plan_id:
+        return jsonify({'status': 'error', 'message': 'plan_id is required'}), 400
+
+    users = dynamodb.get_users_by_plan(plan_id)
+    if not users:
+        return jsonify({'status': 'error', 'message': 'No users found for this plan_id'}), 404
+
+    # Prepare CSV in memory
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=['email', 'is_paid', 'plan_id', 'fullName'])
+    writer.writeheader()
+    for user in users:
+        writer.writerow({
+            'email': user.get('email', ''),
+            'is_paid': user.get('is_paid', ''),
+            'plan_id': user.get('plan_id', ''),
+            'fullName': user.get('fullName', '')
+        })
+
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=users_{plan_id}.csv'}
+    )
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
