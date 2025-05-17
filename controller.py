@@ -62,7 +62,7 @@ def generate_id(size=6):
 
 
 def get_time():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
 # TABLE CREATION
 def create_user_table():
@@ -1132,7 +1132,7 @@ def get_upcoming_lectures_for_exam(exam_id):
     Query GSI to return upcoming lectures (today or future) for a given exam_id.
     """
     try:
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(IST).isoformat()
 
         response = LectureTable.query(
             IndexName='ExamUpcomingLecturesIndex',   # Your GSI name
@@ -1163,7 +1163,7 @@ def get_past_lectures_for_exam(exam_id):
     Query GSI to return past lectures (before today) for a given exam_id.
     """
     try:
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(IST).isoformat()
 
         response = LectureTable.query(
             IndexName='ExamUpcomingLecturesIndex',   # Same GSI
@@ -1194,7 +1194,7 @@ def get_lecture_dashboard_details(exam_id):
     Returns 2 upcoming and 2 past lectures for given exam_id.
     """
     try:
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(IST).isoformat()
 
         # Upcoming lectures (future dates)
         upcoming_response = LectureTable.query(

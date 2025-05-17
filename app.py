@@ -909,7 +909,7 @@ def grant_paid_access_route():
     if not email or not plan_id:
         return jsonify({'status': 'error', 'message': 'email and plan_id are required'}), 400
     # Calculate plan_valid_till as 1 month from now in UTC ISO format
-    plan_valid_till = (datetime.utcnow() + relativedelta(months=1)).replace(microsecond=0).isoformat() + 'Z'
+    plan_valid_till = (datetime.now(IST) + relativedelta(months=1)).replace(microsecond=0).isoformat() + 'Z'
     result = dynamodb.grant_paid_access(email, plan_id, plan_valid_till)
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status
