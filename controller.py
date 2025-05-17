@@ -1038,7 +1038,7 @@ def create_lecture(yt_link, category, title,
         'date_time_of_zoom_lec': date_str,
         'module_id': module_id,
         'exam_id': exam_id,
-        'created_at': datetime.utcnow().replace(microsecond=0).isoformat()
+        'created_at': datetime.now(IST).replace(microsecond=0).isoformat()
     }
 
     try:
