@@ -19,6 +19,7 @@ from flask_jwt_extended import (
 from datetime import datetime
 import logging
 from dateutil.relativedelta import relativedelta
+from dateutil import parser
 from zoneinfo import ZoneInfo
 import random
 import csv
@@ -1489,3 +1490,60 @@ def get_users_by_plan(plan_id: str) -> list:
         return response.get('Items', [])
     except Exception as e:
         return []
+    
+
+def cleanup_expired_user_plans() -> dict:
+    """
+    Scans all users and removes is_paid, plan_id, plan_valid_till if plan_valid_till < now (IST).
+    Returns a summary dict including total RCU consumed.
+    """
+    try:
+        now = datetime.now(IST)
+        total_rcu = 0
+        response = UserTable.scan(
+            FilterExpression=Attr('plan_valid_till').exists(),
+            ReturnConsumedCapacity='TOTAL'
+        )
+        users = response.get('Items', [])
+        total_rcu += response.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
+        cleaned = []
+        # Handle pagination
+        while 'LastEvaluatedKey' in response:
+            response = UserTable.scan(
+                FilterExpression=Attr('plan_valid_till').exists(),
+                ExclusiveStartKey=response['LastEvaluatedKey'],
+                ReturnConsumedCapacity='TOTAL'
+            )
+            users.extend(response.get('Items', []))
+            total_rcu += response.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
+        for user in users:
+            plan_valid_till = user.get('plan_valid_till')
+            if not plan_valid_till:
+                continue
+            try:
+                # Remove trailing Z if present for robust parsing
+                plan_valid_till_clean = plan_valid_till.rstrip('Z')
+                expiry = parser.parse(plan_valid_till_clean)
+                # Convert to IST for comparison
+                expiry_ist = expiry.astimezone(IST)
+            except Exception:
+                continue
+            if expiry_ist < now:
+                update_resp = UserTable.update_item(
+                    Key={'email': user['email']},
+                    UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till",
+                    ReturnConsumedCapacity='TOTAL'
+                )
+                total_rcu += update_resp.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
+                cleaned.append(user['email'])
+        return {
+            "status": "success",
+            "cleaned_users": cleaned,
+            "count": len(cleaned),
+            "rcu_consumed": total_rcu
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }

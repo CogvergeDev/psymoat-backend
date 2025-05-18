@@ -945,5 +945,10 @@ def export_users_by_plan():
         headers={'Content-Disposition': f'attachment; filename=users_{plan_id}.csv'}
     )
 
+@app.route('/cleanup-expired-plans', methods=['POST'])
+def cleanup_expired_plans_route():
+    result = dynamodb.cleanup_expired_user_plans()
+    return jsonify(result), 200 if result.get("status") == "success" else 500
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
