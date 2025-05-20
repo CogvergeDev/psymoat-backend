@@ -477,12 +477,24 @@ def submit_questions(data, user):
     # ─── 4. updating data_graph_modulewise ───────────────────────────────────
     user.setdefault("data_graph_modulewise", {})
     user["data_graph_modulewise"].setdefault(exam_id, {})
-    user["data_graph_modulewise"][exam_id].setdefault(module_id, {
-        "correct_answers": 0,
-        "total_questions": get_module_no_of_questions_for_init(module_id),
-    })
-    total_correct = sum(data.get(f"{lvl}_correct", 0) for lvl in ("easy", "medium", "hard"))
-    user["data_graph_modulewise"][exam_id][module_id]["correct_answers"] += total_correct
+    user["data_graph_modulewise"][exam_id].setdefault(module_id, {})
+
+    module_stats = user["data_graph_modulewise"][exam_id][module_id]
+
+    # ensure each counter/key exists
+    module_stats.setdefault("correct_answers", 0)
+    module_stats.setdefault("incorrect_answers", 0)
+    module_stats.setdefault("total_questions",
+                        get_module_no_of_questions_for_init(module_id))
+
+    # now safely add your new totals
+    total_correct   = sum(data.get(f"{lvl}_correct",   0) for lvl in ("easy","medium","hard"))
+    total_incorrect = sum(data.get(f"{lvl}_incorrect", 0) for lvl in ("easy","medium","hard"))
+
+    module_stats["correct_answers"]   += total_correct
+    module_stats["incorrect_answers"] += total_incorrect
+
+    print("module_stats after update:", module_stats)
 
     # ─── 5. updating solved_wrong ────────────────────────────────────────────
     user.setdefault("solved_wrong", {})
@@ -532,6 +544,9 @@ def submit_questions(data, user):
         return {"status": "error", "message": f"Error saving QnA or updating user: {e}"}
 
     return response
+
+
+
 # DATA OPERATIONS
 def get_module_no_of_questions(module_id):
     res =  ModuleTable.get_item(
