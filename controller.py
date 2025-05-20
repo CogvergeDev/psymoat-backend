@@ -1547,3 +1547,21 @@ def cleanup_expired_user_plans() -> dict:
             "status": "error",
             "message": str(e)
         }
+    
+
+def change_user_password(email: str, new_password: str) -> dict:
+    """
+    Changes the password for the user with the given email.
+    """
+    try:
+        # Hash the new password using bcrypt (same as register)
+        hashed_pw = bcrypt.generate_password_hash(new_password).decode('utf-8')
+        resp = UserTable.update_item(
+            Key={'email': email},
+            UpdateExpression="SET password = :pw",
+            ExpressionAttributeValues={':pw': hashed_pw},
+            ReturnValues="UPDATED_NEW"
+        )
+        return {"status": "success", "message": "Password updated successfully."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

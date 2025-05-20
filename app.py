@@ -949,6 +949,18 @@ def export_users_by_plan():
 def cleanup_expired_plans_route():
     result = dynamodb.cleanup_expired_user_plans()
     return jsonify(result), 200 if result.get("status") == "success" else 500
+@app.route('/change-password', methods=['POST'])
+def change_password_route():
+    data = request.get_json(force=True)
+    email = data.get('email')
+    new_password = data.get('new_password')
+    if not email or not new_password:
+        return jsonify({"status": "error", "message": "email and new_password are required"}), 400
+    result = dynamodb.change_user_password(email, new_password)
+    status = 200 if result.get("status") == "success" else 500
+    return jsonify(result), status
+
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
+
