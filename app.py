@@ -960,6 +960,22 @@ def change_password_route():
     status = 200 if result.get("status") == "success" else 500
     return jsonify(result), status
 
+@app.route('/remove-user-graphs', methods=['POST'])
+def remove_user_graphs_route():
+    data = request.get_json(force=True)
+    email = data.get('email')
+    if not email:
+        return jsonify({"status": "error", "message": "email is required"}), 400
+    result = dynamodb.remove_user_graphs(email)
+    status = 200 if result.get("status") == "success" else 500
+    return jsonify(result), status
+
+@app.route('/remove-graphs-all-users', methods=['POST'])
+def remove_graphs_all_users_route():
+    result = dynamodb.remove_graphs_all_users()
+    status = 200 if result.get("status") == "success" else 500
+    return jsonify(result), status
+
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)

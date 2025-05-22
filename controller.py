@@ -1580,3 +1580,44 @@ def change_user_password(email: str, new_password: str) -> dict:
         return {"status": "success", "message": "Password updated successfully."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    
+
+
+def remove_user_graphs(email: str) -> dict:
+    """
+    Removes data_graph_modulewise and data_graph_leetcode_accuracy from the given user.
+    """
+    try:
+        resp = UserTable.update_item(
+            Key={'email': email},
+            UpdateExpression="REMOVE data_graph_modulewise, data_graph_leetcode_accuracy, solved_wrong",
+            ReturnValues="UPDATED_NEW"
+        )
+        return {"status": "success", "message": f"Graphs removed for {email}."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    
+
+def remove_graphs_all_users() -> dict:
+    """
+    Removes data_graph_modulewise and data_graph_leetcode_accuracy from all users.
+    """
+    try:
+        response = UserTable.scan(
+            ProjectionExpression="email"
+        )
+        users = response.get('Items', [])
+        cleaned = []
+        for user in users:
+            email = user['email']
+            try:
+                UserTable.update_item(
+                    Key={'email': email},
+                    UpdateExpression="REMOVE data_graph_modulewise, data_graph_leetcode_accuracy, solved_wrong"
+                )
+                cleaned.append(email)
+            except Exception:
+                continue
+        return {"status": "success", "cleaned_users": cleaned, "count": len(cleaned)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
