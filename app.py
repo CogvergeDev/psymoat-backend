@@ -914,7 +914,6 @@ def grant_paid_access_route():
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status
 
-
 @app.route('/export-users-by-plan', methods=['POST'])
 def export_users_by_plan():
     data = request.get_json(force=True)
@@ -926,16 +925,36 @@ def export_users_by_plan():
     if not users:
         return jsonify({'status': 'error', 'message': 'No users found for this plan_id'}), 404
 
+    # sort by created_at descending (latest first)
+    # assumes ISO-8601 strings like "2025-05-27T14:30:00"
+    try:
+        users = sorted(
+            users,
+            key=lambda u: datetime.fromisoformat(u.get('plan_valid_till', '')),
+            reverse=True
+        )
+    except ValueError:
+        # fallback to lexicographical if some timestamps aren't ISO-8601
+        users = sorted(
+            users,
+            key=lambda u: u.get('plan_valid_till', ''),
+            reverse=True
+        )
+
     # Prepare CSV in memory
     output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=['email', 'is_paid', 'plan_id', 'fullName'])
+    fieldnames = ['email', 'is_paid', 'plan_id', 'fullName', 'plan_valid_till']
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
+
     for user in users:
+
         writer.writerow({
             'email': user.get('email', ''),
             'is_paid': user.get('is_paid', ''),
             'plan_id': user.get('plan_id', ''),
-            'fullName': user.get('fullName', '')
+            'fullName': user.get('fullName', ''),
+            'plan_valid_till': user.get('plan_valid_till', '')
         })
 
     output.seek(0)
@@ -949,6 +968,7 @@ def export_users_by_plan():
 def cleanup_expired_plans_route():
     result = dynamodb.cleanup_expired_user_plans()
     return jsonify(result), 200 if result.get("status") == "success" else 500
+
 @app.route('/change-password', methods=['POST'])
 def change_password_route():
     data = request.get_json(force=True)
@@ -975,6 +995,19 @@ def remove_graphs_all_users_route():
     result = dynamodb.remove_graphs_all_users()
     status = 200 if result.get("status") == "success" else 500
     return jsonify(result), status
+
+@app.route('/get-user-test-data', methods=['GET'])
+@jwt_required()
+def get_user_test_data():
+    try:
+        email = get_jwt_identity()
+        result = dynamodb.get_user_test_data(email)
+        if isinstance(result, tuple):
+            # Error from controller
+            return jsonify(result[0]), result[1]
+        return jsonify({"tests_submitted": result}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch user test data: {str(e)}"}), 500
 
 
 if __name__ == '__main__':

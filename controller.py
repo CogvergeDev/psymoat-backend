@@ -1500,7 +1500,7 @@ def get_users_by_plan(plan_id: str) -> list:
     try:
         response = UserTable.scan(
             FilterExpression=Attr('plan_id').eq(plan_id),
-            ProjectionExpression="email, is_paid, plan_id, fullName"
+            ProjectionExpression="email, is_paid, plan_id, fullName, plan_valid_till"
         )
         return response.get('Items', [])
     except Exception as e:
@@ -1621,3 +1621,13 @@ def remove_graphs_all_users() -> dict:
         return {"status": "success", "cleaned_users": cleaned, "count": len(cleaned)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    
+def get_user_test_data(email):
+
+    try:
+        resp = TestsSolvedUserDataTable.get_item(Key={'email': email}, ProjectionExpression='tests_submitted')
+        if 'Item' not in resp:
+            return {'error': 'User not found'}, 404
+        return resp['Item'].get('tests_submitted', [])
+    except Exception as e:
+        return {'error': f'Failed to fetch tests_submitted: {str(e)}'}, 500
