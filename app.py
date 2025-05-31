@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import os
 from flask import Flask, Response, request, jsonify
 import controller as dynamodb
-from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, get_jwt, jwt_required, get_jwt_identity
 from flask_cors import CORS
 from dotenv import load_dotenv
 from botocore.exceptions import BotoCoreError, ClientError
@@ -611,7 +611,7 @@ def add_new_lecture():
         required_fields = [
             'yt_link', 'category', 'title', 'instructor_details',
             'key_topics', 'description', 'zoom_link',
-            'date_time_of_zoom_lec', 'exam_id', 'module_id'
+            'date_time_of_zoom_lec', 'exam_id', 'module_id' , 'is_free'
         ]
 
         missing_fields = [field for field in required_fields if field not in data]
@@ -631,7 +631,8 @@ def add_new_lecture():
             zoom_link=data['zoom_link'],
             date_time_of_zoom_lec=data['date_time_of_zoom_lec'],
             exam_id=data['exam_id'],
-            module_id=data['module_id']
+            module_id=data['module_id'],
+            is_free = data['is_free']
         )
 
         return jsonify({
@@ -684,6 +685,49 @@ def get_lecture(lecture_id):
             'status': 'error',
             'message': f'Internal server error: {str(e)}'
         }), 500
+
+@app.route('/get-free-upcoming-lectures' , methods=['GET'])
+@jwt_required()
+def get_free_lectures():
+
+    claims = get_jwt()
+
+    exam_id = request.json['exam_id']
+    is_paid = claims.get('is_paid')
+
+    print(is_paid)
+    if is_paid == "false":
+        try:
+            lectures = dynamodb.get_free_lectures_for_exam(exam_id)
+
+            return jsonify({
+                'status': 'success',
+                'upcoming_lectures': lectures
+            }), 200
+
+        except RuntimeError as e:
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 500
+
+        except (BotoCoreError, ClientError) as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'AWS client error: {str(e)}'
+            }), 502
+
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'Internal server error: {str(e)}'
+            }), 500
+    else:
+        return jsonify({
+                'status': 'success',
+                'message': f'User is paid.'
+            }), 200
+
 
 @app.route('/get-random-lectures/<string:module_id>', methods=['GET'])
 def get_random_module_lectures(module_id):
@@ -1008,6 +1052,7 @@ def get_user_test_data():
         return jsonify({"tests_submitted": result}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch user test data: {str(e)}"}), 500
+
 
 
 if __name__ == '__main__':
