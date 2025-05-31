@@ -863,21 +863,22 @@ def save_successful_payment(payment_data: dict) -> dict:
         },
         ReturnValues="UPDATED_NEW"
     )
-
     additional_claims = {
-        "is_paid": "true",
+        "is_paid": "true",           
         "plan_id": payment_data['plan_id']
     }
-    
-    access_token = create_access_token(identity=payment_data['user_email'] , additional_claims=additional_claims)
-    response = jsonify({'msg': 'Payload updated.'})
-    set_access_cookies(response, access_token)
+    access_token = create_access_token(
+        identity=payment_data['user_email'],
+        additional_claims=additional_claims
+    )
 
-    return {
-        'status':  'success',
-        'message': 'Payment history saved and user subscription updated',
-        'user_update': user_response.get('Attributes', {})
-    }
+    response = jsonify({
+        'status':       'success',
+        'message':      'Payment history saved and user subscription updated',
+        'user_update':  user_response.get('Attributes', {})
+    })
+    set_access_cookies(response, access_token)
+    return response, 200
 
 
 def delete_user_payment_fields(email: str) -> dict:
