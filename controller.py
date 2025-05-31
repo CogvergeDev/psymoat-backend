@@ -1036,7 +1036,7 @@ def get_wrong_questions(user_id: str, module_id: str, idx: int) -> list:
 def create_lecture(yt_link, category, title,
                    instructor_details, key_topics,
                    description, zoom_link, date_time_of_zoom_lec,
-                   module_id, exam_id, is_free):
+                   module_id, exam_id):
     """
     Inserts a new lecture record into DynamoDB and updates the corresponding module's lectures list.
     Returns the generated lecture_id.
@@ -1069,7 +1069,6 @@ def create_lecture(yt_link, category, title,
         'date_time_of_zoom_lec': date_str,
         'module_id': module_id,
         'exam_id': exam_id,
-        'is_free': is_free,
         'created_at': datetime.now(IST).replace(microsecond=0).isoformat()
     }
 
@@ -1155,61 +1154,6 @@ def get_random_lectures_from_module(module_id, count=5):
 
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"DynamoDB operation failed: {e}")
-    
-def get_free_lectures_for_exam(exam_id):
-    """
-    Returns all upcoming lectures for a given exam_id where is_free == True,
-    using the ExamIsFreeUpcomingLecturesIndex GSI for efficient querying.
-    Now also only includes the zoom_link if the current time is at least one hour
-    before the scheduled lecture time.
-    Assumes:
-      - GSI: exam_id (HASH), is_free (RANGE), date_time_of_zoom_lec (projected attribute)
-      - is_free is stored as 1 (True) or 0 (False)
-      - Each lecture item has a 'zoom_link' attribute
-    """
-    try:
-        # Current time in IST
-        now = datetime.now(IST)
-        now_iso = now.isoformat()
-
-        # Query the GSI for exam_id and is_free == True, filtering for upcoming lectures
-        response = LectureTable.query(
-            IndexName='ExamIsFreeUpcomingLecturesIndex',
-            KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('is_free').eq(1),
-            FilterExpression=Attr('date_time_of_zoom_lec').gte(now_iso)
-        )
-
-        items = response.get('Items', [])
-
-        # Sort by date_time_of_zoom_lec ascending (soonest first)
-        items.sort(key=lambda x: x.get('date_time_of_zoom_lec', ''))
-
-        free_lectures = []
-        for lecture in items:
-            lec_time_str = lecture.get('date_time_of_zoom_lec')
-            # Parse the ISO string into a timezone-aware datetime
-            lec_time = datetime.fromisoformat(lec_time_str)
-
-            # Only include the zoom_link if current time >= (lecture time - 1 hour)
-            zoom_link_to_send = None
-            if now >= (lec_time - timedelta(hours=1)):
-                zoom_link_to_send = lecture.get('zoom_link')
-
-            free_lectures.append({
-                'lecture_id': lecture.get('lecture_id'),
-                'title': lecture.get('title'),
-                'category': lecture.get('category'),
-                'instructor_details': lecture.get('instructor_details'),
-                'date_time_of_zoom_lec': lec_time_str,
-                'yt_link': lecture.get('yt_link'),
-                'zoom_link': zoom_link_to_send
-            })
-
-        return free_lectures
-
-    except (BotoCoreError, ClientError) as e:
-        raise RuntimeError(f"DynamoDB query failed: {e}")
-
 
 def get_upcoming_lectures_for_exam(exam_id):
     """
@@ -1699,3 +1643,81 @@ def get_user_test_data(email):
         return resp['Item'].get('tests_submitted', [])
     except Exception as e:
         return {'error': f'Failed to fetch tests_submitted: {str(e)}'}, 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+# def get_free_lectures_for_exam(exam_id):
+#     """
+#     Returns all upcoming lectures for a given exam_id where is_free == True,
+#     using the ExamIsFreeUpcomingLecturesIndex GSI for efficient querying.
+#     Now also only includes the zoom_link if the current time is at least one hour
+#     before the scheduled lecture time.
+#     Assumes:
+#       - GSI: exam_id (HASH), is_free (RANGE), date_time_of_zoom_lec (projected attribute)
+#       - is_free is stored as 1 (True) or 0 (False)
+#       - Each lecture item has a 'zoom_link' attribute
+#     """
+#     try:
+#         # Current time in IST
+#         now = datetime.now(IST)
+#         now_iso = now.isoformat()
+
+#         # Query the GSI for exam_id and is_free == True, filtering for upcoming lectures
+#         response = LectureTable.query(
+#             IndexName='ExamIsFreeUpcomingLecturesIndex',
+#             KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('is_free').eq(1),
+#             FilterExpression=Attr('date_time_of_zoom_lec').gte(now_iso)
+#         )
+
+#         items = response.get('Items', [])
+
+#         # Sort by date_time_of_zoom_lec ascending (soonest first)
+#         items.sort(key=lambda x: x.get('date_time_of_zoom_lec', ''))
+
+#         free_lectures = []
+#         for lecture in items:
+#             lec_time_str = lecture.get('date_time_of_zoom_lec')
+#             # Parse the ISO string into a timezone-aware datetime
+#             lec_time = datetime.fromisoformat(lec_time_str)
+
+#             # Only include the zoom_link if current time >= (lecture time - 1 hour)
+#             zoom_link_to_send = None
+#             if now >= (lec_time - timedelta(hours=1)):
+#                 zoom_link_to_send = lecture.get('zoom_link')
+
+#             free_lectures.append({
+#                 'lecture_id': lecture.get('lecture_id'),
+#                 'title': lecture.get('title'),
+#                 'category': lecture.get('category'),
+#                 'instructor_details': lecture.get('instructor_details'),
+#                 'date_time_of_zoom_lec': lec_time_str,
+#                 'yt_link': lecture.get('yt_link'),
+#                 'zoom_link': zoom_link_to_send
+#             })
+
+#         return free_lectures
+
+#     except (BotoCoreError, ClientError) as e:
+#         raise RuntimeError(f"DynamoDB query failed: {e}")
+

@@ -612,7 +612,7 @@ def add_new_lecture():
         required_fields = [
             'yt_link', 'category', 'title', 'instructor_details',
             'key_topics', 'description', 'zoom_link',
-            'date_time_of_zoom_lec', 'exam_id', 'module_id' , 'is_free'
+            'date_time_of_zoom_lec', 'exam_id', 'module_id'
         ]
 
         missing_fields = [field for field in required_fields if field not in data]
@@ -633,7 +633,6 @@ def add_new_lecture():
             date_time_of_zoom_lec=data['date_time_of_zoom_lec'],
             exam_id=data['exam_id'],
             module_id=data['module_id'],
-            is_free = data['is_free']
         )
 
         return jsonify({
@@ -686,42 +685,6 @@ def get_lecture(lecture_id):
             'status': 'error',
             'message': f'Internal server error: {str(e)}'
         }), 500
-
-@app.route('/get-free-upcoming-lectures' , methods=['GET'])
-@jwt_required()
-def get_free_lectures():
-
-    # claims = get_jwt()
-
-    exam_id = request.json['exam_id']
-    # is_paid = claims.get('is_paid')
-
-    try:
-        lectures = dynamodb.get_free_lectures_for_exam(exam_id)
-
-        return jsonify({
-            'status': 'success',
-            'upcoming_lectures': lectures
-        }), 200
-
-    except RuntimeError as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-    except (BotoCoreError, ClientError) as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'AWS client error: {str(e)}'
-        }), 502
-
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': f'Internal server error: {str(e)}'
-        }), 500
-
 
 @app.route('/get-random-lectures/<string:module_id>', methods=['GET'])
 def get_random_module_lectures(module_id):
@@ -1051,4 +1014,45 @@ def get_user_test_data():
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
+
+
+
+
+
+
+
+# @app.route('/get-free-upcoming-lectures' , methods=['GET'])
+# @jwt_required()
+# def get_free_lectures():
+
+#     # claims = get_jwt()
+
+#     exam_id = request.json['exam_id']
+#     # is_paid = claims.get('is_paid')
+
+#     try:
+#         lectures = dynamodb.get_free_lectures_for_exam(exam_id)
+
+#         return jsonify({
+#             'status': 'success',
+#             'upcoming_lectures': lectures
+#         }), 200
+
+#     except RuntimeError as e:
+#         return jsonify({
+#             'status': 'error',
+#             'message': str(e)
+#         }), 500
+
+#     except (BotoCoreError, ClientError) as e:
+#         return jsonify({
+#             'status': 'error',
+#             'message': f'AWS client error: {str(e)}'
+#         }), 502
+
+#     except Exception as e:
+#         return jsonify({
+#             'status': 'error',
+#             'message': f'Internal server error: {str(e)}'
+#         }), 500
 
