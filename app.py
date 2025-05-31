@@ -691,43 +691,36 @@ def get_lecture(lecture_id):
 @jwt_required()
 def get_free_lectures():
 
-    claims = get_jwt()
+    # claims = get_jwt()
 
     exam_id = request.json['exam_id']
-    is_paid = claims.get('is_paid')
+    # is_paid = claims.get('is_paid')
 
-    print(is_paid)
-    if is_paid == "false":
-        try:
-            lectures = dynamodb.get_free_lectures_for_exam(exam_id)
+    try:
+        lectures = dynamodb.get_free_lectures_for_exam(exam_id)
 
-            return jsonify({
-                'status': 'success',
-                'upcoming_lectures': lectures
-            }), 200
-
-        except RuntimeError as e:
-            return jsonify({
-                'status': 'error',
-                'message': str(e)
-            }), 500
-
-        except (BotoCoreError, ClientError) as e:
-            return jsonify({
-                'status': 'error',
-                'message': f'AWS client error: {str(e)}'
-            }), 502
-
-        except Exception as e:
-            return jsonify({
-                'status': 'error',
-                'message': f'Internal server error: {str(e)}'
-            }), 500
-    else:
         return jsonify({
-                'status': 'success',
-                'message': f'User is paid.'
-            }), 200
+            'status': 'success',
+            'upcoming_lectures': lectures
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
 
 
 @app.route('/get-random-lectures/<string:module_id>', methods=['GET'])
