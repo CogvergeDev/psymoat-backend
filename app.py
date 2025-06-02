@@ -602,6 +602,25 @@ def get_exam_module_statistics():
     except Exception as e:
         return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
 
+@app.route('/update-lecture/<string:lecture_id>', methods=['PUT'])
+def update_lecture(lecture_id):
+    data = request.get_json(force=True)
+    required_fields = [
+        'yt_link', 'category', 'title', 'instructor_details',
+        'key_topics', 'description', 'zoom_link',
+        'date_time_of_zoom_lec', 'exam_id', 'module_id'
+    ]
+    
+    # Only update fields present in the request and in required_fields
+    update_fields = {field: data[field] for field in required_fields if field in data}
+    if not update_fields:
+        return jsonify({'status': 'error', 'message': 'No valid fields provided for update.'}), 400
+
+    try:
+        updated = dynamodb.update_lecture_by_id(lecture_id, update_fields)
+        return jsonify({'status': 'success', 'updated_fields': list(update_fields.keys()), 'attributes': updated}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/add-new-lecture', methods=['POST'])

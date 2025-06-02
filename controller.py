@@ -1031,6 +1031,35 @@ def get_wrong_questions(user_id: str, module_id: str, idx: int) -> list:
     except Exception as e:
         raise RuntimeError(f"Failed to fetch wrong questions: {e}")
 
+def update_lecture_by_id(lecture_id, update_fields):
+    """
+    Update the lecture with lecture_id for any of the required fields provided.
+    Returns the updated attributes.
+    """
+    if not update_fields:
+        raise ValueError("No fields to update.")
+
+    # Special handling for date_time_of_zoom_lec: ensure ISO format
+    if 'date_time_of_zoom_lec' in update_fields:
+        dt = update_fields['date_time_of_zoom_lec']
+        try:
+            if isinstance(dt, str):
+                dt = datetime.fromisoformat(dt)
+            update_fields['date_time_of_zoom_lec'] = dt.replace(microsecond=0).isoformat()
+        except Exception:
+            raise ValueError("Invalid date_time_of_zoom_lec format. Must be ISO8601.")
+
+    update_expr = "SET " + ", ".join([f"{k} = :{k}" for k in update_fields])
+    expr_attr_vals = {f":{k}": v for k, v in update_fields.items()}
+
+    resp = LectureTable.update_item(
+        Key={'lecture_id': lecture_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=expr_attr_vals,
+        ReturnValues='UPDATED_NEW'
+    )
+    return resp.get('Attributes', {})
+
 
 
 def create_lecture(yt_link, category, title,
