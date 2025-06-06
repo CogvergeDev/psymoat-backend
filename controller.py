@@ -745,10 +745,12 @@ def login(email, password):
         if not bcrypt.check_password_hash(user['password'], password):
             return jsonify({'msg': 'Invalid credentials'}), 401
 
+
         additional_claims = {
-            "is_paid": user["is_paid"],
-            "plan_id": user["plan_id"]
+            "is_paid": user.get("is_paid", "false"),
+            "plan_id": user.get("plan_id", "")
         }
+
         
         access_token = create_access_token(identity=email , additional_claims=additional_claims)
         refresh_token = create_refresh_token(identity=email)
