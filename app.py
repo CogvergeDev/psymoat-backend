@@ -135,6 +135,11 @@ def create_payment_history_table_route():
     dynamodb.create_payment_history_table()
     return 'PaymentHistory Table created', 200
 
+@app.route('/create-genzee-table')
+def create_genzee_table_route():
+    dynamodb.create_genzee_table()
+    return 'Genzee Table created', 200
+
 
 # INITIALIZATION ROUTES
 @app.route('/initialize-new-module', methods=['POST'])
@@ -1028,6 +1033,121 @@ def get_user_test_data():
         return jsonify({"tests_submitted": result}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to fetch user test data: {str(e)}"}), 500
+
+
+@app.route('/razorpay/genzeetherapist/create', methods=['POST'])
+def razorpay_genzeetherapist_create():
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON payload', 'details': str(e)}), 400
+
+    amount = data.get('amount')
+    currency = data.get('currency', 'INR')
+
+    # Validate required fields
+    missing = [k for k in ('amount') if not data.get(k)]
+    if missing:
+        return jsonify({'error': 'Missing required fields', 'missing': missing}), 400
+
+    # Validate amount
+    try:
+        amt_int = int(amount)
+        if amt_int <= 0:
+            raise ValueError("Amount must be a positive integer")
+    except (ValueError, TypeError) as e:
+        return jsonify({'error': 'Invalid "amount" value', 'details': str(e)}), 400
+
+    # Create Razorpay order
+    try:
+        razorpay_order = razorpay_client.order.create({
+            'amount': amt_int * 100,   # in paise
+            'currency': currency,
+            'payment_capture': 1
+        })
+    except BadRequestError as e:
+        return jsonify({'error': 'Razorpay order creation failed (BadRequest)', 'details': str(e)}), 400
+    except RazorpayServerError as e:
+        return jsonify({'error': 'Razorpay server error', 'details': str(e)}), 502
+    except Exception as e:
+        return jsonify({'error': 'Unexpected error while creating order', 'details': str(e)}), 500
+
+    # **No DB write here** — we only persist on completion
+    return jsonify({'data': razorpay_order}), 200
+
+
+@app.route('/razorpay/genzeetherapist/complete', methods=['POST'])
+def razorpay_genzeetherapist_complete():
+    try:
+        data = request.get_json(force=True)
+    except Exception as e:
+        return jsonify({'error': 'Invalid JSON payload', 'details': str(e)}), 400
+
+    # Now require therapist details as well, since we only save on complete
+    required = ('payment_id', 'order_id', 'signature', 'email', 'fullName', 'qualifications')
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({'error': 'Missing required fields', 'missing': missing}), 400
+
+    payment_id     = data['payment_id']
+    order_id       = data['order_id']
+    signature      = data['signature']
+    email          = data['email']
+    fullName       = data['fullName']
+    qualifications = data['qualifications']
+
+    # Verify signature
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            'razorpay_order_id': order_id,
+            'razorpay_payment_id': payment_id,
+            'razorpay_signature': signature
+        })
+    except SignatureVerificationError as e:
+        return jsonify({'error': 'Signature verification failed', 'details': str(e)}), 400
+
+    # Fetch payment details
+    try:
+        payment = razorpay_client.payment.fetch(payment_id)
+    except Exception as e:
+        return jsonify({'error': 'Could not fetch payment details', 'details': str(e)}), 502
+
+    # Persist or update DB based on capture status
+    try:
+        if payment.get('status') == 'captured':
+            dynamodb.save_genzee_therapist_on_complete(
+                email=email,
+                fullName=fullName,
+                qualifications=qualifications,
+                order_id=order_id,
+                payment_id=payment_id,
+                signature=signature,
+                status='paid'
+            )
+            return jsonify({
+                'status': 'success',
+                'message': 'Payment verified and therapist info saved',
+                'payment': payment
+            }), 200
+        else:
+            dynamodb.save_genzee_therapist_on_complete(
+                email=email,
+                fullName=fullName,
+                qualifications=qualifications,
+                order_id=order_id,
+                payment_id=payment_id,
+                signature=signature,
+                status='failed'
+            )
+            return jsonify({
+                'status': 'failure',
+                'message': f'Payment not captured (status={payment.get("status")})',
+                'payment': payment
+            }), 402
+
+    except Exception as e:
+        return jsonify({'error': 'Failed to save/update therapist info', 'details': str(e)}), 500
+
 
 
 

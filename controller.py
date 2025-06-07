@@ -57,6 +57,8 @@ PaymentHistoryTable = dynamodb_resource.Table('PaymentHistoryTable')
 LectureTable = dynamodb_resource.Table('Lecture')
 MockTestTable = dynamodb_resource.Table('MockTest')
 TestsSolvedUserDataTable = dynamodb_resource.Table('TestsSolvedUserData')
+GENZEE_TABLE = dynamodb_resource.Table('GenzeeTherapistJune')
+
 
 def generate_id(size=6):
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(size))
@@ -65,7 +67,16 @@ def generate_id(size=6):
 def get_time():
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
+
 # TABLE CREATION
+def create_genzee_table():
+    return dynamodb_resource.create_table(
+        TableName='GenzeeTherapistJune',
+        KeySchema=[{'AttributeName': 'g_payment_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'g_payment_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
 def create_user_table():
     return dynamodb_resource.create_table(
         TableName='User',
@@ -1678,6 +1689,27 @@ def get_user_test_data(email):
 
 
 
+
+
+def save_genzee_therapist_on_complete(email, fullName, qualifications,
+                                      order_id, payment_id, signature, status):
+    """
+    Save therapist info once, at payment completion.
+    Uses g_payment_id as the DynamoDB partition key.
+    """
+    GENZEE_TABLE.put_item(
+        Item={
+            'g_payment_id': payment_id,
+            'email': email,
+            'fullName': fullName,
+            'qualifications': qualifications,
+            'order_id': order_id,
+            'signature': signature,
+            'status': status,
+            'created_at': datetime.now(IST).isoformat(),
+            'updated_at': datetime.now(IST).isoformat()
+        }
+    )
 
 
 
