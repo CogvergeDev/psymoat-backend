@@ -1053,7 +1053,7 @@ def razorpay_genzeetherapist_create():
     currency = data.get('currency', 'INR')
 
     # Validate required fields
-    missing = [k for k in ('amount') if not data.get(k)]
+    missing = [k for k in ('amount', 'currency') if not data.get(k)]
     if missing:
         return jsonify({'error': 'Missing required fields', 'missing': missing}), 400
 
