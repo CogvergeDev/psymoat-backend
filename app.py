@@ -47,6 +47,13 @@ razorpay_client = razorpay.Client(
     )
 )
 
+razorpay_client_test = razorpay.Client(
+    auth=(
+        os.getenv("TEST_RAZORPAY_KEY_ID"),
+        os.getenv("TEST_RAZORPAY_KEY_SECRET")
+    )
+)
+
 
 app.config['JWT_SECRET_KEY'] = os.getenv("JWT_SECRET_KEY")
 app.config['JWT_TOKEN_LOCATION'] = ['cookies']
@@ -1060,7 +1067,7 @@ def razorpay_genzeetherapist_create():
 
     # Create Razorpay order
     try:
-        razorpay_order = razorpay_client.order.create({
+        razorpay_order = razorpay_client_test.order.create({
             'amount': amt_int * 100,   # in paise
             'currency': currency,
             'payment_capture': 1
@@ -1098,7 +1105,7 @@ def razorpay_genzeetherapist_complete():
 
     # Verify signature
     try:
-        razorpay_client.utility.verify_payment_signature({
+        razorpay_client_test.utility.verify_payment_signature({
             'razorpay_order_id': order_id,
             'razorpay_payment_id': payment_id,
             'razorpay_signature': signature
@@ -1108,7 +1115,7 @@ def razorpay_genzeetherapist_complete():
 
     # Fetch payment details
     try:
-        payment = razorpay_client.payment.fetch(payment_id)
+        payment = razorpay_client_test.payment.fetch(payment_id)
     except Exception as e:
         return jsonify({'error': 'Could not fetch payment details', 'details': str(e)}), 502
 
