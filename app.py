@@ -557,10 +557,10 @@ def complete_razorpay_order():
 
 
 @app.route('/delete-payment-fields', methods=['DELETE'])
-@jwt_required()
 def delete_payment_fields():
     # 1) grab email from the validated JWT
-    email = get_jwt_identity()
+    data = request.get_json(force=True)
+    email = data.get('email')
 
     try:
         # 2) delete those attributes
