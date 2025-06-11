@@ -31,10 +31,9 @@ CORS(
         "http://localhost:3000",
         "https://psymoat.vercel.app",
         "https://www.psymoat.in",
-        "https://psymoat.in",
-        "https://psymoat-9w5leylea-cogvergedevs-projects.vercel.app",
         "https://proxy-psymoat.vercel.app",
-        "https://www.psymoat.in/api"
+        "https://www.psymoat.in/api",
+        "https://psymoat-frontend.vercel.app"
     ],
     supports_credentials=True
 )
