@@ -406,8 +406,8 @@ def count_exam_questions_by_difficulty(exam_id: str, difficulty: str) -> int:
 
 def get_likelyhood_clearing_value(
     easy, hard, incorrect,
-    B1=0.1, B2=0.25,
-    E=3.0,
+    B1=0.3, B2=0.35,
+    E=1.0,
     scale=38, ceiling=90
 ):
     # ── 0) normalize types ───────────────────────────────────────────────

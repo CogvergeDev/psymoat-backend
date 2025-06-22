@@ -19,7 +19,6 @@ from dateutil.relativedelta import relativedelta
 # define IST timezone
 IST = ZoneInfo("Asia/Kolkata")
 
-
 load_dotenv()
 
 app = Flask(__name__)
@@ -225,7 +224,6 @@ def get_module_no_of_questions(module_id):
 
 
 # NEW APIs 
-
 # Get all questions from a module (ig dev api)
 @app.route('/get-all-questions/<string:module_id>')
 def get_all_questions(module_id):
