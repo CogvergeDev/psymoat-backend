@@ -405,25 +405,26 @@ def count_exam_questions_by_difficulty(exam_id: str, difficulty: str) -> int:
 
 
 def get_likelyhood_clearing_value(
-    easy, hard, incorrect,
+    easy, medium, hard, incorrect,
     B1=0.3, B2=0.35,
     E=1.0,
     scale=38, ceiling=90
 ):
     # ── 0) normalize types ───────────────────────────────────────────────
     easy      = float(easy)
+    medium    = float(medium)
     hard      = float(hard)
     incorrect = float(incorrect)
 
     # ── 1) entry diagnostics ─────────────────────────────────────────────
 
     # ── 2) total attempts ────────────────────────────────────────────────
-    total_attempts = easy + hard + incorrect
+    total_attempts = easy + hard +medium + incorrect
     if total_attempts == 0:
         return 0
 
     # ── 3) raw score ────────────────────────────────────────────────────
-    raw_score = B1 * easy + B2 * hard
+    raw_score = B1 * easy + B2 * hard + B1* medium
 
     # ── 4) error penalty ────────────────────────────────────────────────
     error_rate    = incorrect / total_attempts
@@ -478,6 +479,7 @@ def submit_questions(data, user):
     # compute and normalize your score
     raw_lcv = get_likelyhood_clearing_value(
         graph['easy']["correct_answered"],
+        graph['medium']['correct_answered'],
         graph['hard']["correct_answered"],
         total_incorrect_for_likelyhood
     )
