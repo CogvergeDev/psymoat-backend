@@ -417,9 +417,10 @@ def create_razorpay_order():
         return jsonify({'error': 'The "amount" field is required.'}), 400
 
     # Validate amount type & value
+
     try:
         amt_int = int(amount)
-        if amt_int <= 0:
+        if amt_int < 0:
             raise ValueError("Amount must be a positive integer")
     except (ValueError, TypeError) as e:
         return jsonify({
@@ -428,14 +429,15 @@ def create_razorpay_order():
         }), 400
 
     # Create order with Razorpay
+
     try:
+
         razorpay_order = razorpay_client.order.create({
             'amount': amt_int * 100,   # paise
             'currency': currency,
             'payment_capture': 1
         })
     except BadRequestError as e:
-        print("YE AYA")
         # client-side issue (e.g. unsupported currency)
         return jsonify({
             'error': 'Razorpay order creation failed (BadRequest)',
@@ -476,6 +478,7 @@ def complete_razorpay_order():
     plan_id    = data.get('plan_id')
     created_at = datetime.now(IST).isoformat()
     user_email = get_jwt_identity()
+    exams_ids = data.get('exam_ids')
 
     missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
     if missing:
@@ -506,6 +509,7 @@ def complete_razorpay_order():
             'details': str(e)
         }), 502
 
+
     # if not captured, record failure only
     if payment.get('status') != 'captured':
         dynamodb.save_failed_payment_history({
@@ -527,22 +531,20 @@ def complete_razorpay_order():
 
     # ——— at this point status == 'captured' ———
     try:
-        result = dynamodb.save_successful_payment({
+        # Pass exam_ids to save_successful_payment
+
+        response, status_code = dynamodb.save_successful_payment({
             'payment_id': payment_id,
             'order_id':   order_id,
             'amount':     amount,
-            'signature':  signature,
+            'signature':  signature,    
             'created_at': created_at,
             'user_email': user_email,
-            'plan_id':    plan_id
+            'plan_id':    plan_id,
+            'exam_ids':   exams_ids
         })
-        
-        return jsonify({
-            'status':  'success',
-            'message': 'Payment verified and saved',
-            'payment': payment,
-            'db':      result
-        }), 200
+        print(response)
+        return response, status_code
 
     except Exception as e:
         return jsonify({

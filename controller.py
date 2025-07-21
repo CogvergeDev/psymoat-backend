@@ -845,8 +845,10 @@ def save_successful_payment(payment_data: dict) -> dict:
        - mark is_paid = True
        - set plan_id
        - set plan_valid_till = now + 1 month
+       - update exams_paid_for if plan_id matches
     """
     # 1) record the payment
+    
     PaymentHistoryTable.put_item(Item={
         'payment_id':   payment_data['payment_id'],
         'order_id':     payment_data['order_id'],
@@ -858,29 +860,63 @@ def save_successful_payment(payment_data: dict) -> dict:
         'status':       'captured',
     })
 
+
     # 2) compute expiry exactly one month from now
-    expiry_dt  = datetime.now(IST) + relativedelta(months=1)
+    expiry_dt  = datetime.now(IST) + relativedelta(months=6)
     expiry_iso = expiry_dt.isoformat()
 
-    # 3) update or create the user record
+    # 3) Prepare exams_paid_for logic
+    plan_id = payment_data.get('plan_id')
+    exam_ids = payment_data.get('exam_ids', [])
+    exams_paid_for = None
+    update_expr = """
+        SET
+          is_paid            = :paid,
+          plan_id            = :plan,
+          plan_valid_till    = :valid
+    """
+    expr_values = {
+        ':paid':  True,
+        ':plan':  plan_id,
+        ':valid': expiry_iso
+    }
+
+    # Only update exams_paid_for for specific plans
+    if plan_id in ( "cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1"):
+        # Fetch current exams_paid_for
+        user_resp = UserTable.get_item(Key={'email': payment_data['user_email']})
+        user = user_resp.get('Item', {})
+        current_exams = user.get('exams_paid_for', [])
+        to_add = []
+        if plan_id == 'cuet_pg_trainer_v1' and exam_ids:
+            to_add = [exam_ids[0]]
+        elif plan_id == 'cuet_pg_advanced_v1':
+            to_add = exam_ids
+        elif plan_id == 'netjrf_trainer_v1':
+            to_add = exam_ids
+        elif plan_id == 'netjrf_advanced_v1':
+            to_add = exam_ids
+
+        # Avoid duplicates
+        for eid in to_add:
+            if eid and eid not in current_exams:
+                current_exams.append(eid)
+        exams_paid_for = current_exams
+        update_expr += ", exams_paid_for = :epf"
+        expr_values[':epf'] = exams_paid_for
+
+    # 4) update or create the user record
     user_response = UserTable.update_item(
         Key={'email': payment_data['user_email']},
-        UpdateExpression="""
-            SET
-              is_paid            = :paid,
-              plan_id            = :plan,
-              plan_valid_till    = :valid
-        """,
-        ExpressionAttributeValues={
-            ':paid':  True,
-            ':plan':  payment_data['plan_id'],
-            ':valid': expiry_iso
-        },
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=expr_values,
         ReturnValues="UPDATED_NEW"
     )
+
     additional_claims = {
         "is_paid": "true",           
-        "plan_id": payment_data['plan_id']
+        "plan_id": plan_id,
+        "exams_paid_for": exams_paid_for
     }
     access_token = create_access_token(
         identity=payment_data['user_email'],
@@ -904,7 +940,7 @@ def delete_user_payment_fields(email: str) -> dict:
     try:
         resp = UserTable.update_item(
             Key={ 'email': email },
-            UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till",
+            UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for",
             ReturnValues="UPDATED_OLD"  
             # returns the old values of any removed attributes
         )
