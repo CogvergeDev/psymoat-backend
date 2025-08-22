@@ -1156,6 +1156,15 @@ def razorpay_genzeetherapist_complete():
         return jsonify({'error': 'Failed to save/update therapist info', 'details': str(e)}), 500
 
 
+@app.route('/admin/get-user', methods=['POST'])
+def admin_get_user_route():
+    data = request.get_json(force=True)
+    email = data.get('email')
+    if not email:
+        return jsonify({'status': 'error', 'message': 'email is required'}), 400
+    result = dynamodb.admin_get_user(email)
+    status = 200 if result.get('status') == 'success' else 404
+    return jsonify(result), status
 
 
 if __name__ == '__main__':

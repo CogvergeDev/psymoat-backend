@@ -720,6 +720,20 @@ def get_user(email):
     except Exception as e:
         return {'error': 'An unexpected error occurred', 'details': str(e)}
 
+def admin_get_user(email: str) -> dict:
+    """
+    Returns the user record for the given email (excluding password), or an error if not found.
+    """
+    try:
+        resp = UserTable.get_item(Key={'email': email})
+        if 'Item' not in resp:
+            return {'status': 'error', 'message': 'User not found!'}
+        user = resp['Item']
+        user.pop('password', None)
+        return {'status': 'success', 'user': user}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
 # AUTHENTICATION
 def register(email, password, fullName):
     try:
