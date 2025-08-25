@@ -37,7 +37,9 @@ CORS(
         "https://www.psymoat.in",
         "https://proxy-psymoat.vercel.app",
         "https://www.psymoat.in/api",
-        "https://psymoat-frontend.vercel.app"
+        "https://psymoat-frontend.vercel.app",
+        "https://psymoat-blog.vercel.app"
+        "https://psymoat-blog.vercel.app/api"
     ],
     supports_credentials=True
 )
