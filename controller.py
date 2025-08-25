@@ -26,6 +26,8 @@ import csv
 from io import StringIO
 import math
 from decimal import Decimal
+import re
+
 
 
 
@@ -58,6 +60,7 @@ LectureTable = dynamodb_resource.Table('Lecture')
 MockTestTable = dynamodb_resource.Table('MockTest')
 TestsSolvedUserDataTable = dynamodb_resource.Table('TestsSolvedUserData')
 GENZEE_TABLE = dynamodb_resource.Table('GenzeeTherapistJune')
+BlogTable = dynamodb_resource.Table('Blogs')
 
 
 def generate_id(size=6):
@@ -68,12 +71,41 @@ def get_time():
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def generate_slug(title: str) -> str:
+    """
+    Generate a URL-friendly slug from the blog title.
+    """
+    slug = title.lower()
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)  # remove special chars
+    slug = re.sub(r'\s+', '-', slug)          # replace spaces with dashes
+    slug = slug.strip('-')
+    return slug
+
+def calculate_read_time(blocks: list) -> str:
+    """
+    Calculates read time (average 200 words/minute).
+    """
+    word_count = 0
+    for block in blocks:
+        if block.get("type") == "text":
+            word_count += len(block.get("content", "").split())
+    minutes = max(1, round(word_count / 200))  # at least 1 min
+    return f"{minutes} min read"
+
 # TABLE CREATION
 def create_genzee_table():
     return dynamodb_resource.create_table(
         TableName='GenzeeTherapistJune',
         KeySchema=[{'AttributeName': 'g_payment_id', 'KeyType': 'HASH'}],
         AttributeDefinitions=[{'AttributeName': 'g_payment_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+
+def create_blog_table():
+    return dynamodb_resource.create_table(
+        TableName='Blogs',
+        KeySchema=[{'AttributeName': 'blog_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'blog_id', 'AttributeType': 'S'}],
         BillingMode='PAY_PER_REQUEST'
     )
 
@@ -273,7 +305,7 @@ def add_questions_to_module(module_id: str, rows: list, paid_count: int, free_co
         new_ids = []
         for row in rows:
             # Validate required fields
-            required_fields = ['Question', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Answer']
+            required_fields = ['Question', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Correct Answer']
             missing = [f for f in required_fields if not row.get(f)]
             if missing:
                 raise ValueError(f"Missing required fields: {', '.join(missing)}")
@@ -293,7 +325,7 @@ def add_questions_to_module(module_id: str, rows: list, paid_count: int, free_co
                     row['Option 3'].strip(),
                     row['Option 4'].strip()
                 ],
-                'correct_answer': row['Answer'].strip(),
+                'correct_answer': row['Correct Answer'].strip(),
                 'explanation': row.get('Explanation', '').strip(),
                 'difficulty': row.get('Difficulty', 'Medium').strip(),
                 'is_paid': row['is_paid']
@@ -1781,15 +1813,145 @@ def save_genzee_therapist_on_complete(email, fullName, qualifications,
     )
 
 
+#blogs shit
+def get_all_blogs():
+    """
+    Fetches all blogs from BlogTable and returns a list of blog metadata.
+    """
+    try:
+        response = BlogTable.scan(
+            ProjectionExpression="blog_id, title, slug, excerpt, author, tags, cover_image_url, read_time, published_at"
+        )
+        blogs = response.get('Items', [])
+
+        # Handle pagination if result is large
+        while 'LastEvaluatedKey' in response:
+            response = BlogTable.scan(
+                ProjectionExpression="blog_id, title, slug, excerpt, author, tags, cover_image_url, read_time, published_at",
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            blogs.extend(response.get('Items', []))
+
+        return {"blogs": blogs}, 200
+
+    except Exception as e:
+        return {"error": f"Failed to fetch blogs: {str(e)}"}, 500
+
+def get_blog_by_id(blog_id: str):
+    """
+    Fetch a single blog by blog_id from BlogTable, returning all fields.
+    """
+    try:
+        response = BlogTable.get_item(Key={'blog_id': blog_id})
+
+        if 'Item' not in response:
+            return {"error": f"Blog with id {blog_id} not found."}, 404
+
+        return response['Item'], 200
+
+    except Exception as e:
+        return {"error": f"Failed to fetch blog: {str(e)}"}, 500
 
 
+def create_blog(data: dict):
+    """
+    Creates a new blog entry in BlogTable.
+    """
+    try:
+        blog_id = generate_id()  # assume this is already defined somewhere
+        slug = generate_slug(data.get("title", ""))
+        read_time = calculate_read_time(data.get("blocks", []))
+        published_at = datetime.now(IST).isoformat()
+
+        blog_item = {
+            "blog_id": blog_id,
+            "title": data.get("title"),
+            "slug": slug,
+            "excerpt": data.get("excerpt"),
+            "author": data.get("author"),
+            "tags": data.get("tags", []),
+            "cover_image_url": data.get("cover_image_url"),
+            "blocks": data.get("blocks", []),
+            "read_time": read_time,
+            "published_at": published_at
+        }
+
+        BlogTable.put_item(Item=blog_item)
+
+        return {"status": "success", "blog": blog_item}, 201
+
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to create blog: {str(e)}"}, 500
+
+def edit_blog(data: dict):
+    """
+    Updates an existing blog in BlogTable by blog_id.
+    Recalculates slug and read_time.
+    """
+    try:
+        blog_id = data.get("blog_id")
+        if not blog_id:
+            return {"status": "error", "message": "blog_id is required"}, 400
+
+        slug = generate_slug(data.get("title", ""))
+        read_time = calculate_read_time(data.get("blocks", []))
+
+        update_expr = """
+            SET title = :title,
+                slug = :slug,
+                excerpt = :excerpt,
+                author = :author,
+                tags = :tags,
+                cover_image_url = :cover,
+                blocks = :blocks,
+                read_time = :read_time
+        """
+
+        expr_vals = {
+            ":title": data.get("title"),
+            ":slug": slug,
+            ":excerpt": data.get("excerpt"),
+            ":author": data.get("author"),
+            ":tags": data.get("tags", []),
+            ":cover": data.get("cover_image_url"),
+            ":blocks": data.get("blocks", []),
+            ":read_time": read_time
+        }
+
+        BlogTable.update_item(
+            Key={"blog_id": blog_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=expr_vals
+        )
+
+        return {
+            "status": "success",
+            "message": f"Blog {blog_id} updated successfully",
+            "blog_id": blog_id,
+            "slug": slug,
+            "read_time": read_time,
+        }, 200
+
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to update blog: {str(e)}"}, 500
 
 
+def delete_blog(blog_id: str):
+    """
+    Deletes a blog from BlogTable by blog_id.
+    """
+    try:
+        # Check if blog exists first
+        resp = BlogTable.get_item(Key={'blog_id': blog_id})
+        if 'Item' not in resp:
+            return {"status": "error", "message": f"Blog with id {blog_id} not found"}, 404
 
+        BlogTable.delete_item(Key={'blog_id': blog_id})
 
+        return {"status": "success", "message": f"Blog {blog_id} deleted successfully"}, 200
 
-
-
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to delete blog: {str(e)}"}, 500
 
 
 

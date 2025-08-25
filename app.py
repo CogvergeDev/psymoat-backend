@@ -15,6 +15,10 @@ import csv
 from io import StringIO
 from zoneinfo import ZoneInfo
 from dateutil.relativedelta import relativedelta
+import cloudinary
+import cloudinary.uploader
+from cloudinary.utils import cloudinary_url
+
 
 # define IST timezone
 IST = ZoneInfo("Asia/Kolkata")
@@ -28,6 +32,7 @@ CORS(
     app,
     origins=[
         "http://localhost:3000",
+        "http://localhost:8080",
         "https://psymoat.vercel.app",
         "https://www.psymoat.in",
         "https://proxy-psymoat.vercel.app",
@@ -50,6 +55,14 @@ razorpay_client_test = razorpay.Client(
         os.getenv("TEST_RAZORPAY_KEY_ID"),
         os.getenv("TEST_RAZORPAY_KEY_SECRET")
     )
+)
+
+# Configuration       
+cloudinary.config( 
+    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"), 
+    api_key = os.getenv("CLOUDINARY_API_KEY"), 
+    api_secret = os.getenv('CLOUDINARY_API_SECRET'), 
+    secure=True
 )
 
 
@@ -93,6 +106,11 @@ def check_auth():
 def create_user_table_route():
     dynamodb.create_user_table()
     return 'User Table created', 200
+
+@app.route('/create-blog-table')
+def create_blog_table_route():
+    dynamodb.create_blog_table()
+    return 'Blog Table created', 200
 
 @app.route('/create-tests-solved-table')
 def create_tests_table_route():
@@ -1165,6 +1183,63 @@ def admin_get_user_route():
     result = dynamodb.admin_get_user(email)
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status
+
+
+
+#sample cloudinary upload
+@app.route("/upload", methods=["POST"])
+def upload():
+    file_to_upload = request.files["file"]
+    if file_to_upload:
+        upload_result = cloudinary.uploader.upload(file_to_upload)
+        return jsonify(upload_result)
+    return jsonify({"error": "No file uploaded"}), 400
+
+
+# blogs api routes 
+@app.route("/blogs/get-blogs-list", methods=["GET"])
+def get_all_blogs():
+    try:
+        blogs, status = dynamodb.get_all_blogs()   # returns (data, status)
+        return jsonify(blogs), status
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch blogs: {str(e)}"}), 500
+
+
+@app.route("/blogs/get-blog/<string:blog_id>", methods=["GET"])
+def get_blog(blog_id):
+    try:
+        blog, status = dynamodb.get_blog_by_id(blog_id)   # returns (data, status)
+        return jsonify(blog), status
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch blog {blog_id}: {str(e)}"}), 500
+
+@app.route("/blogs/create-new", methods=["POST"])
+def create_new_blog():
+    try:
+        data = request.get_json()
+        result, status = dynamodb.create_blog(data)
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"error": f"Failed to create blog: {str(e)}"}), 500
+    
+@app.route("/blogs/edit", methods=["PUT"])
+def edit_blog_route():
+    try:
+        data = request.get_json()
+        result, status = dynamodb.edit_blog(data)
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"error": f"Failed to edit blog: {str(e)}"}), 500
+    
+@app.route("/blogs/delete/<string:blog_id>", methods=["DELETE"])
+def delete_blog_route(blog_id):
+    try:
+        result, status = dynamodb.delete_blog(blog_id)
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete blog {blog_id}: {str(e)}"}), 500
+
 
 
 if __name__ == '__main__':
