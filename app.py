@@ -644,6 +644,9 @@ def update_lecture(lecture_id):
     
     # Only update fields present in the request and in required_fields
     update_fields = {field: data[field] for field in required_fields if field in data}
+    # Accept notes_markdown as optional
+    if 'notes_markdown' in data:
+        update_fields['notes_markdown'] = data['notes_markdown']
     if not update_fields:
         return jsonify({'status': 'error', 'message': 'No valid fields provided for update.'}), 400
 
@@ -662,7 +665,7 @@ def add_new_lecture():
         required_fields = [
             'yt_link', 'category', 'title', 'instructor_details',
             'key_topics', 'description', 'zoom_link',
-            'date_time_of_zoom_lec', 'exam_id', 'module_id'
+            'date_time_of_zoom_lec', 'exam_id', 'module_id', 'notes_markdown'
         ]
 
         missing_fields = [field for field in required_fields if field not in data]
@@ -671,7 +674,9 @@ def add_new_lecture():
                 'status': 'error',
                 'message': f'Missing required fields: {", ".join(missing_fields)}'
             }), 400
-
+        # Accept notes_markdown as optional
+        notes_markdown = data.get('notes_markdown', '')
+        print(notes_markdown)
         lecture_id = dynamodb.create_lecture(
             yt_link=data['yt_link'],
             category=data['category'],
@@ -683,6 +688,7 @@ def add_new_lecture():
             date_time_of_zoom_lec=data['date_time_of_zoom_lec'],
             exam_id=data['exam_id'],
             module_id=data['module_id'],
+            notes_markdown=notes_markdown
         )
 
         return jsonify({
@@ -712,12 +718,12 @@ def add_new_lecture():
 def get_lecture(lecture_id):
     try:
         lecture = dynamodb.get_lecture_by_id(lecture_id)
-
+        # Always include notes_markdown (empty string if not present)
+        lecture['notes_markdown'] = lecture.get('notes_markdown', '')
         return jsonify({
             'status': 'success',
             'lecture': lecture
         }), 200
-
     except RuntimeError as e:
         return jsonify({
             'status': 'error',
@@ -769,7 +775,9 @@ def get_random_module_lectures(module_id):
 def get_upcoming_lectures_for_exam(exam_id):
     try:
         lectures = dynamodb.get_upcoming_lectures_for_exam(exam_id)
-
+        # Always include notes_markdown (empty string if not present)
+        for lec in lectures:
+            lec['notes_markdown'] = lec.get('notes_markdown', '')
         return jsonify({
             'status': 'success',
             'upcoming_lectures': lectures
@@ -797,7 +805,9 @@ def get_upcoming_lectures_for_exam(exam_id):
 def get_past_lectures_for_exam(exam_id):
     try:
         lectures = dynamodb.get_past_lectures_for_exam(exam_id)
-
+        # Always include notes_markdown (empty string if not present)
+        for lec in lectures:
+            lec['notes_markdown'] = lec.get('notes_markdown', '')
         return jsonify({
             'status': 'success',
             'past_lectures': lectures
@@ -942,7 +952,6 @@ def submit_mock_test():
 
     except Exception as e:
         return jsonify({"msg": "Server error", "error": str(e)}), 500
-
 
 @app.route('/get-test-dashboard/<string:exam_id>', methods=['GET'])
 def get_test_dashboard(exam_id):
@@ -1241,6 +1250,17 @@ def delete_blog_route(blog_id):
         return jsonify(result), status
     except Exception as e:
         return jsonify({"error": f"Failed to delete blog {blog_id}: {str(e)}"}), 500
+
+@app.route('/delete-lecture/<string:lecture_id>', methods=['DELETE'])
+def delete_lecture_route(lecture_id):
+    try:
+        result = dynamodb.delete_lecture_by_id(lecture_id)
+        if result.get('status') == 'success':
+            return jsonify({'status': 'success', 'message': f'Lecture {lecture_id} deleted.'}), 200
+        else:
+            return jsonify({'status': 'error', 'message': result.get('message', 'Failed to delete lecture.')}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 

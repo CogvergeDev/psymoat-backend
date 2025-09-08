@@ -1146,6 +1146,7 @@ def update_lecture_by_id(lecture_id, update_fields):
         except Exception:
             raise ValueError("Invalid date_time_of_zoom_lec format. Must be ISO8601.")
 
+    # If notes_markdown is not present in the DB, add it (always set if present in update_fields)
     update_expr = "SET " + ", ".join([f"{k} = :{k}" for k in update_fields])
     expr_attr_vals = {f":{k}": v for k, v in update_fields.items()}
 
@@ -1162,7 +1163,7 @@ def update_lecture_by_id(lecture_id, update_fields):
 def create_lecture(yt_link, category, title,
                    instructor_details, key_topics,
                    description, zoom_link, date_time_of_zoom_lec,
-                   module_id, exam_id):
+                   exam_id, module_id, notes_markdown=''):
     """
     Inserts a new lecture record into DynamoDB and updates the corresponding module's lectures list.
     Returns the generated lecture_id.
@@ -1195,7 +1196,8 @@ def create_lecture(yt_link, category, title,
         'date_time_of_zoom_lec': date_str,
         'module_id': module_id,
         'exam_id': exam_id,
-        'created_at': datetime.now(IST).replace(microsecond=0).isoformat()
+        'created_at': datetime.now(IST).replace(microsecond=0).isoformat(),
+        'notes_markdown': notes_markdown or ''
     }
 
     try:
@@ -1233,6 +1235,8 @@ def get_lecture_by_id(lecture_id):
         item = response.get('Item')
         if not item:
             raise RuntimeError(f"Lecture with id '{lecture_id}' not found.")
+        # Always include notes_markdown (empty string if not present)
+        item['notes_markdown'] = item.get('notes_markdown', '')
         return item
 
     except (BotoCoreError, ClientError) as e:
@@ -1303,7 +1307,8 @@ def get_upcoming_lectures_for_exam(exam_id):
                 'category': lecture.get('category'),
                 'instructor_details': lecture.get('instructor_details'),
                 'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                'yt_link': lecture.get('yt_link')
+                'yt_link': lecture.get('yt_link'),
+                'notes_markdown': lecture.get('notes_markdown', '')
             })
 
         return lectures
@@ -1334,7 +1339,8 @@ def get_past_lectures_for_exam(exam_id):
                 'category': lecture.get('category'),
                 'instructor_details': lecture.get('instructor_details'),
                 'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                'yt_link': lecture.get('yt_link')
+                'yt_link': lecture.get('yt_link'),
+                'notes_markdown': lecture.get('notes_markdown', '')
             })
 
         return lectures
@@ -1953,65 +1959,47 @@ def delete_blog(blog_id: str):
     except Exception as e:
         return {"status": "error", "message": f"Failed to delete blog: {str(e)}"}, 500
 
-
-
-
-
-
-
-
-    
-# def get_free_lectures_for_exam(exam_id):
-#     """
-#     Returns all upcoming lectures for a given exam_id where is_free == True,
-#     using the ExamIsFreeUpcomingLecturesIndex GSI for efficient querying.
-#     Now also only includes the zoom_link if the current time is at least one hour
-#     before the scheduled lecture time.
-#     Assumes:
-#       - GSI: exam_id (HASH), is_free (RANGE), date_time_of_zoom_lec (projected attribute)
-#       - is_free is stored as 1 (True) or 0 (False)
-#       - Each lecture item has a 'zoom_link' attribute
-#     """
-#     try:
-#         # Current time in IST
-#         now = datetime.now(IST)
-#         now_iso = now.isoformat()
-
-#         # Query the GSI for exam_id and is_free == True, filtering for upcoming lectures
-#         response = LectureTable.query(
-#             IndexName='ExamIsFreeUpcomingLecturesIndex',
-#             KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('is_free').eq(1),
-#             FilterExpression=Attr('date_time_of_zoom_lec').gte(now_iso)
-#         )
-
-#         items = response.get('Items', [])
-
-#         # Sort by date_time_of_zoom_lec ascending (soonest first)
-#         items.sort(key=lambda x: x.get('date_time_of_zoom_lec', ''))
-
-#         free_lectures = []
-#         for lecture in items:
-#             lec_time_str = lecture.get('date_time_of_zoom_lec')
-#             # Parse the ISO string into a timezone-aware datetime
-#             lec_time = datetime.fromisoformat(lec_time_str)
-
-#             # Only include the zoom_link if current time >= (lecture time - 1 hour)
-#             zoom_link_to_send = None
-#             if now >= (lec_time - timedelta(hours=1)):
-#                 zoom_link_to_send = lecture.get('zoom_link')
-
-#             free_lectures.append({
-#                 'lecture_id': lecture.get('lecture_id'),
-#                 'title': lecture.get('title'),
-#                 'category': lecture.get('category'),
-#                 'instructor_details': lecture.get('instructor_details'),
-#                 'date_time_of_zoom_lec': lec_time_str,
-#                 'yt_link': lecture.get('yt_link'),
-#                 'zoom_link': zoom_link_to_send
-#             })
-
-#         return free_lectures
-
-#     except (BotoCoreError, ClientError) as e:
-#         raise RuntimeError(f"DynamoDB query failed: {e}")
+def delete_lecture_by_id(lecture_id):
+    """
+    Deletes a lecture from the LectureTable by lecture_id and removes it from the module's lectures list.
+    Returns a dict with status and message.
+    """
+    try:
+        # Fetch the lecture to get module_id
+        resp = LectureTable.get_item(Key={'lecture_id': lecture_id})
+        item = resp.get('Item')
+        if not item:
+            return {'status': 'error', 'message': f'Lecture {lecture_id} not found.'}
+        module_id = item.get('module_id')
+        # Delete the lecture
+        LectureTable.delete_item(Key={'lecture_id': lecture_id})
+        # Remove lecture_id from the module's lectures list
+        if module_id:
+            try:
+                ModuleTable.update_item(
+                    Key={'module_id': module_id},
+                    UpdateExpression="SET lectures = list_remove(lectures, :idx)",
+                    ConditionExpression="contains(lectures, :lid)",
+                    ExpressionAttributeValues={
+                        ':lid': lecture_id,
+                        ':idx': None  # We'll need to fetch the index
+                    }
+                )
+            except Exception:
+                # Fallback: fetch, remove, and update
+                mod = ModuleTable.get_item(Key={'module_id': module_id}).get('Item')
+                if mod and 'lectures' in mod and lecture_id in mod['lectures']:
+                    lectures = mod['lectures']
+                    idx = lectures.index(lecture_id)
+                    lectures.pop(idx)
+                    ModuleTable.update_item(
+                        Key={'module_id': module_id},
+                        UpdateExpression="SET lectures = :l",
+                        ExpressionAttributeValues={':l': lectures}
+                    )
+        return {'status': 'success', 'message': f'Lecture {lecture_id} deleted.'}
+    except (BotoCoreError, ClientError) as e:
+        return {'status': 'error', 'message': f'Failed to delete lecture: {e}'}
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
 
