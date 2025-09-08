@@ -2074,3 +2074,41 @@ def get_notes_by_lecture_id(lecture_id):
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"Failed to fetch from DynamoDB: {e}")
 
+def get_all_lectures_for_exam(exam_id):
+    """
+    Query GSI to return all lectures (both past and upcoming) for a given exam_id.
+    """
+    try:
+        response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',
+            KeyConditionExpression=Key('exam_id').eq(exam_id),
+        )
+
+        items = response.get('Items', [])
+
+        # Handle pagination
+        while 'LastEvaluatedKey' in response:
+            response = LectureTable.query(
+                IndexName='ExamUpcomingLecturesIndex',
+                KeyConditionExpression=Key('exam_id').eq(exam_id),
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            items.extend(response.get('Items', []))
+
+        lectures = []
+        for lecture in items:
+            lectures.append({
+                'lecture_id': lecture.get('lecture_id'),
+                'title': lecture.get('title'),
+                'category': lecture.get('category'),
+                'instructor_details': lecture.get('instructor_details'),
+                'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
+                'yt_link': lecture.get('yt_link'),
+                'notes_markdown': lecture.get('notes_markdown', '')
+            })
+
+        return lectures
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB query failed: {e}")
+

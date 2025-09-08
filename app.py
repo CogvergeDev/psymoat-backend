@@ -833,6 +833,36 @@ def get_past_lectures_for_exam(exam_id):
             'message': f'Internal server error: {str(e)}'
         }), 500
 
+@app.route('/get-all-lectures/<string:exam_id>', methods=['GET'])
+def get_all_lectures_for_exam(exam_id):
+    try:
+        lectures = dynamodb.get_all_lectures_for_exam(exam_id)
+        # Always include notes_markdown (empty string if not present)
+        for lec in lectures:
+            lec['notes_markdown'] = lec.get('notes_markdown', '')
+        return jsonify({
+            'status': 'success',
+            'all_lectures': lectures
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
 @app.route('/get-lecture-dashboard-details', methods=['POST'])
 def get_lecture_dashboard_details_route():
     try:
