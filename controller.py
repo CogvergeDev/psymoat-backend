@@ -539,7 +539,7 @@ def submit_questions(data, user):
     module_stats["correct_answers"]   += total_correct
     module_stats["incorrect_answers"] += total_incorrect
 
-    print("module_stats after update:", module_stats)
+    # print("module_stats after update:", module_stats)
 
     # ─── 5. updating solved_wrong ────────────────────────────────────────────
     user.setdefault("solved_wrong", {})
@@ -1173,6 +1173,7 @@ def create_lecture(yt_link, category, title,
     lecture_id = generate_id()
 
     # ✅ Normalize date_time_of_zoom_lec to ISO8601 format
+    # print(date_time_of_zoom_lec)
     if isinstance(date_time_of_zoom_lec, datetime):
         date_str = date_time_of_zoom_lec.replace(microsecond=0).isoformat()
     elif isinstance(date_time_of_zoom_lec, str):
@@ -2077,6 +2078,7 @@ def get_notes_by_lecture_id(lecture_id):
 def get_all_lectures_for_exam(exam_id):
     """
     Query GSI to return all lectures (both past and upcoming) for a given exam_id.
+    Returns all fields that are returned by get_lecture_by_id.
     """
     try:
         response = LectureTable.query(
@@ -2097,15 +2099,23 @@ def get_all_lectures_for_exam(exam_id):
 
         lectures = []
         for lecture in items:
-            lectures.append({
+            # Return all fields just like get_lecture_by_id does
+            lecture_data = {
                 'lecture_id': lecture.get('lecture_id'),
-                'title': lecture.get('title'),
-                'category': lecture.get('category'),
-                'instructor_details': lecture.get('instructor_details'),
-                'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
                 'yt_link': lecture.get('yt_link'),
+                'category': lecture.get('category'),
+                'title': lecture.get('title'),
+                'instructor_details': lecture.get('instructor_details'),
+                'key_topics': lecture.get('key_topics'),
+                'description': lecture.get('description'),
+                'zoom_link': lecture.get('zoom_link'),
+                'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
+                'module_id': lecture.get('module_id'),
+                'exam_id': lecture.get('exam_id'),
+                'created_at': lecture.get('created_at'),
                 'notes_markdown': lecture.get('notes_markdown', '')
-            })
+            }
+            lectures.append(lecture_data)
 
         return lectures
 

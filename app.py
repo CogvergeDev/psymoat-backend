@@ -678,7 +678,6 @@ def add_new_lecture():
             }), 400
         # Accept notes_markdown as optional
         notes_markdown = data.get('notes_markdown', '')
-        print(notes_markdown)
         lecture_id = dynamodb.create_lecture(
             yt_link=data['yt_link'],
             category=data['category'],
