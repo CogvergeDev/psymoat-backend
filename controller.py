@@ -903,12 +903,13 @@ def save_successful_payment(payment_data: dict) -> dict:
         'signature':    payment_data['signature'],
         'user_email':   payment_data['user_email'],
         'plan_id':      payment_data['plan_id'],
+        'months':       payment_data['months'],
         'status':       'captured',
     })
 
 
     # 2) compute expiry exactly one month from now
-    expiry_dt  = datetime.now(IST) + relativedelta(months=6)
+    expiry_dt  = datetime.now(IST) + relativedelta(payment_data['months'] or 6)
     expiry_iso = expiry_dt.isoformat()
 
     # 3) Prepare exams_paid_for logic
@@ -1352,6 +1353,7 @@ def get_past_lectures_for_exam(exam_id):
 def get_lecture_dashboard_details(exam_id):
     """
     Returns 2 upcoming and 2 past lectures for given exam_id.
+    Also returns notes for upcoming lectures.
     """
     try:
         now_iso = datetime.now(IST).isoformat()
@@ -1373,6 +1375,13 @@ def get_lecture_dashboard_details(exam_id):
             'yt_link': lec.get('yt_link')
         } for lec in upcoming_items]
 
+        # Notes for upcoming lectures
+        notes = [{
+            'lecture_id': lec.get('lecture_id'),
+            'title': lec.get('title'),
+            'instructor': lec.get('instructor_details')
+        } for lec in upcoming_items]
+
         # Past lectures (older dates)
         past_response = LectureTable.query(
             IndexName='ExamUpcomingLecturesIndex',
@@ -1392,7 +1401,8 @@ def get_lecture_dashboard_details(exam_id):
 
         return {
             'upcoming_lectures': upcoming,
-            'past_lectures': past
+            'past_lectures': past,
+            'notes': notes
         }
 
     except (BotoCoreError, ClientError) as e:
@@ -2002,4 +2012,65 @@ def delete_lecture_by_id(lecture_id):
         return {'status': 'error', 'message': f'Failed to delete lecture: {e}'}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
+
+def get_all_notes_for_exam(exam_id):
+    """
+    Returns all lectures for given exam_id that have non-empty notes_markdown.
+    """
+    try:
+        # Query all lectures for the exam using GSI
+        response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',
+            KeyConditionExpression=Key('exam_id').eq(exam_id)
+        )
+        
+        items = response.get('Items', [])
+        
+        # Handle pagination
+        while 'LastEvaluatedKey' in response:
+            response = LectureTable.query(
+                IndexName='ExamUpcomingLecturesIndex',
+                KeyConditionExpression=Key('exam_id').eq(exam_id),
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            items.extend(response.get('Items', []))
+        
+        # Filter lectures that have non-empty notes_markdown
+        lectures_with_notes = []
+        for lecture in items:
+            notes = lecture.get('notes_markdown', '').strip()
+            if notes:  # Only include if notes_markdown has content
+                lectures_with_notes.append({
+                    'lecture_id': lecture.get('lecture_id'),
+                    'title': lecture.get('title'),
+                    'instructor_details': lecture.get('instructor_details'),
+                    'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec')
+                })
+        
+        return lectures_with_notes
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB query failed: {e}")
+
+def get_notes_by_lecture_id(lecture_id):
+    """
+    Returns notes_markdown and other details for a specific lecture_id.
+    """
+    try:
+        response = LectureTable.get_item(Key={'lecture_id': lecture_id})
+        item = response.get('Item')
+        
+        if not item:
+            raise RuntimeError(f"Lecture with id '{lecture_id}' not found.")
+        
+        return {
+            'lecture_id': item.get('lecture_id'),
+            'title': item.get('title'),
+            'instructor_details': item.get('instructor_details'),
+            'date_time_of_zoom_lec': item.get('date_time_of_zoom_lec'),
+            'notes_markdown': item.get('notes_markdown', '')
+        }
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to fetch from DynamoDB: {e}")
 

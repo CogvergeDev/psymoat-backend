@@ -499,6 +499,7 @@ def complete_razorpay_order():
     created_at = datetime.now(IST).isoformat()
     user_email = get_jwt_identity()
     exams_ids = data.get('exam_ids')
+    months = data.get('months')
 
     missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
     if missing:
@@ -561,7 +562,8 @@ def complete_razorpay_order():
             'created_at': created_at,
             'user_email': user_email,
             'plan_id':    plan_id,
-            'exam_ids':   exams_ids
+            'exam_ids':   exams_ids,
+            'months': months
         })
         print(response)
         return response, status_code
@@ -1261,6 +1263,77 @@ def delete_lecture_route(lecture_id):
             return jsonify({'status': 'error', 'message': result.get('message', 'Failed to delete lecture.')}), 400
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@jwt_required()
+@app.route('/get-all-notes/<string:exam_id>', methods=['GET'])
+def get_all_notes_for_exam_route(exam_id):
+    try:
+        if not exam_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'exam_id is required'
+            }), 400
+
+        notes = dynamodb.get_all_notes_for_exam(exam_id)
+        
+        return jsonify({
+            'status': 'success',
+            'notes': notes
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@jwt_required()
+@app.route('/get-notes/<string:lecture_id>', methods=['GET'])
+def get_notes_by_lecture_id_route(lecture_id):
+    try:
+        if not lecture_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'lecture_id is required'
+            }), 400
+
+        notes_data = dynamodb.get_notes_by_lecture_id(lecture_id)
+        
+        return jsonify({
+            'status': 'success',
+            'data': notes_data
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 404
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
 
 
 
