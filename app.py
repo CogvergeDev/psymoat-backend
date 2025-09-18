@@ -999,6 +999,7 @@ def grant_paid_access_route():
     email = data.get('email')
     plan_id = data.get('plan_id')
     exam_ids = data.get('exam_ids', [])
+    # print(exam_ids)
     if not email or not plan_id:
         return jsonify({'status': 'error', 'message': 'email and plan_id are required'}), 400
     # Calculate plan_valid_till as 6 months from now in UTC ISO format

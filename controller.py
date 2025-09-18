@@ -1632,6 +1632,7 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
     Updates the user in UserTable to set is_paid=True, plan_id=plan_id, plan_valid_till, and exams_paid_for for the new plan_ids.
     """
     try:
+        # print(exam_ids)
         resp = UserTable.get_item(Key={'email': email})
         if 'Item' not in resp:
             return {'status': 'error', 'message': f'User {email} not found.'}
@@ -1642,7 +1643,7 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
             ':plan_valid_till': plan_valid_till
         }
         exams_paid_for = None
-        if plan_id in ("cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1") and exam_ids:
+        if plan_id in ("cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1") and exam_ids:
             user = resp['Item']
             current_exams = user.get('exams_paid_for', [])
             to_add = []
