@@ -995,13 +995,14 @@ def get_test_dashboard(exam_id):
 @app.route('/grant-paid-access', methods=['POST'])
 def grant_paid_access_route():
     data = request.get_json(force=True)
+    months = data.get('months')
     email = data.get('email')
     plan_id = data.get('plan_id')
     exam_ids = data.get('exam_ids', [])
     if not email or not plan_id:
         return jsonify({'status': 'error', 'message': 'email and plan_id are required'}), 400
     # Calculate plan_valid_till as 6 months from now in UTC ISO format
-    plan_valid_till = (datetime.now(IST) + relativedelta(months=6)).replace(microsecond=0).isoformat() + 'Z'
+    plan_valid_till = (datetime.now(IST) + relativedelta(months=months)).replace(microsecond=0).isoformat() + 'Z'
     result = dynamodb.grant_paid_access(email, plan_id, plan_valid_till, exam_ids)
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status

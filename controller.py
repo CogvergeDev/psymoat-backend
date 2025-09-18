@@ -929,7 +929,7 @@ def save_successful_payment(payment_data: dict) -> dict:
     }
 
     # Only update exams_paid_for for specific plans
-    if plan_id in ( "cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1"):
+    if plan_id in ( "cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1"):
         # Fetch current exams_paid_for
         user_resp = UserTable.get_item(Key={'email': payment_data['user_email']})
         user = user_resp.get('Item', {})
@@ -941,7 +941,7 @@ def save_successful_payment(payment_data: dict) -> dict:
             to_add = exam_ids
         elif plan_id == 'netjrf_trainer_v1':
             to_add = exam_ids
-        elif plan_id == 'netjrf_advanced_v1':
+        elif plan_id == 'netjrf_advanced_v1' or plan_id == "ugc_net_advanced_monthly_v1":
             to_add = exam_ids
 
         # Avoid duplicates
@@ -1648,7 +1648,7 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
             to_add = []
             if plan_id == 'cuet_pg_trainer_v1':
                 to_add = [exam_ids[0]]
-            elif plan_id in ('cuet_pg_advanced_v1', 'netjrf_trainer_v1', 'netjrf_advanced_v1'):
+            elif plan_id in ('cuet_pg_advanced_v1', 'netjrf_trainer_v1', 'netjrf_advanced_v1', "ugc_net_advanced_monthly_v1"):
                 to_add = exam_ids
             for eid in to_add:
                 if eid and eid not in current_exams:
