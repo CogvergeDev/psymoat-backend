@@ -651,6 +651,7 @@ def get_all_exam_details():
             'error': str(e)
         }
 
+
 def add_questions_in_module(module_id, data, free_count, paid_count):
 
     return ModuleTable.update_item(
@@ -1324,32 +1325,50 @@ def get_past_lectures_for_exam(exam_id):
     Query GSI to return past lectures (before today) for a given exam_id.
     """
     try:
-        now_iso = datetime.now(IST).isoformat()
-
-        response = LectureTable.query(
-            IndexName='ExamUpcomingLecturesIndex',   # Same GSI
-            KeyConditionExpression=Key('exam_id').eq(exam_id) & Key('date_time_of_zoom_lec').lt(now_iso),
-        )
-
-        items = response.get('Items', [])
-
+        now_iso = datetime.now(IST).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
+        print(f"🔍 Querying for lectures before: {now_iso}")
+        
+        # Initialize variables for pagination
         lectures = []
-        for lecture in items:
-            lectures.append({
-                'lecture_id': lecture.get('lecture_id'),
-                'title': lecture.get('title'),
-                'category': lecture.get('category'),
-                'instructor_details': lecture.get('instructor_details'),
-                'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                'yt_link': lecture.get('yt_link'),
-                'notes_markdown': lecture.get('notes_markdown', '')
-            })
-
+        last_evaluated_key = None
+        
+        # Keep querying until we get all results
+        while True:
+            query_params = {
+                'IndexName': 'ExamUpcomingLecturesIndex',
+                'KeyConditionExpression': Key('exam_id').eq(exam_id) & Key('date_time_of_zoom_lec').lt(now_iso),
+            }
+            
+            # Add pagination token if it exists
+            if last_evaluated_key:
+                query_params['ExclusiveStartKey'] = last_evaluated_key
+            
+            response = LectureTable.query(**query_params)
+            items = response.get('Items', [])
+            
+            print(f"📊 Fetched {len(items)} lectures in this batch")
+            
+            # Process items
+            for lecture in items:
+                lectures.append({
+                    'lecture_id': lecture.get('lecture_id'),
+                    'title': lecture.get('title'),
+                    'category': lecture.get('category'),
+                    'instructor_details': lecture.get('instructor_details'),
+                    'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
+                    'yt_link': lecture.get('yt_link'),
+                })
+            
+            # Check if there are more results
+            last_evaluated_key = response.get('LastEvaluatedKey')
+            if not last_evaluated_key:
+                break  # No more results
+        
+        print(f"✅ Total lectures fetched: {len(lectures)}")
         return lectures
-
+        
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"DynamoDB query failed: {e}")
-
 
 def get_lecture_dashboard_details(exam_id):
     """
@@ -2123,3 +2142,84 @@ def get_all_lectures_for_exam(exam_id):
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"DynamoDB query failed: {e}")
 
+def get_lectures_with_nonstandard_yt_links():
+    """
+    Scans LectureTable and returns lectures where yt_link does NOT match the expected format:
+    https://www.youtube-nocookie.com/embed/{video_id}?si=...&amp;controls=0
+    
+    Returns only lecture_id, title, category, and yt_link.
+    """
+    import re
+    
+    # Expected pattern for standard YouTube nocookie embed links
+    standard_pattern = r'^https://www\.youtube-nocookie\.com/embed/[\w-]+\?si=[\w-]+&amp;controls=0$'
+    
+    try:
+        # Scan all lectures
+        response = LectureTable.scan()
+        items = response.get('Items', [])
+        
+        # Handle pagination
+        while 'LastEvaluatedKey' in response:
+            response = LectureTable.scan(
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            items.extend(response.get('Items', []))
+        
+        # Filter lectures with non-standard yt_link
+        nonstandard_lectures = []
+        for lecture in items:
+            yt_link = lecture.get('yt_link', '')
+            
+            # Check if yt_link doesn't match the standard pattern
+            if yt_link and not re.match(standard_pattern, yt_link):
+                nonstandard_lectures.append({
+                    'lecture_id': lecture.get('lecture_id'),
+                    'title': lecture.get('title'),
+                    'category': lecture.get('category'),
+                    'yt_link': yt_link
+                })
+        
+        return nonstandard_lectures
+        
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"DynamoDB scan failed: {e}")
+
+
+def diagnose_lecture_issue(exam_id, date_after='2025-10-16T18:00:00'):
+    """Check if lectures exist in base table but not in GSI"""
+    try:
+        # 1. Get ALL lectures for this exam from base table (scan)
+        response = LectureTable.scan(
+            FilterExpression=Attr('exam_id').eq(exam_id) & 
+                           Attr('date_time_of_zoom_lec').gt(date_after)
+        )
+        base_table_lectures = response.get('Items', [])
+        print(f"Found {len(base_table_lectures)} lectures in BASE TABLE after {date_after}")
+        
+        # 2. Get lectures from GSI
+        response_gsi = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',
+            KeyConditionExpression=Key('exam_id').eq(exam_id) & 
+                                  Key('date_time_of_zoom_lec').gt(date_after)
+        )
+        gsi_lectures = response_gsi.get('Items', [])
+        print(f"Found {len(gsi_lectures)} lectures in GSI after {date_after}")
+        
+        # 3. Compare
+        base_ids = {lec['lecture_id'] for lec in base_table_lectures}
+        gsi_ids = {lec['lecture_id'] for lec in gsi_lectures}
+        missing = base_ids - gsi_ids
+        
+        if missing:
+            print(f"Missing from GSI: {missing}")
+            # Print details of missing lectures
+            for lec in base_table_lectures:
+                if lec['lecture_id'] in missing:
+                    print(f"Missing lecture: {lec.get('lecture_id')} - {lec.get('date_time_of_zoom_lec')}")
+        
+        return base_table_lectures, gsi_lectures
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return [], []

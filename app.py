@@ -1368,6 +1368,124 @@ def get_notes_by_lecture_id_route(lecture_id):
 
 
 
+@app.route('/get-nonstandard-yt-lectures', methods=['GET'])
+def get_nonstandard_yt_lectures_route():
+    """
+    Fetches all lectures that have YouTube links NOT matching the standard format:
+    https://www.youtube-nocookie.com/embed/{video_id}?si=...&amp;controls=0
+    """
+    try:
+        lectures = dynamodb.get_lectures_with_nonstandard_yt_links()
+        
+        return jsonify({
+            'status': 'success',
+            'count': len(lectures),
+            'lectures': lectures
+        }), 200
+        
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+        
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+    
+@app.route('/diagnose-lecture-issue', methods=['GET'])
+def diagnose_lecture_issue_route():
+    """
+    Diagnoses lecture visibility issues in GSI vs base table.
+    Query params:
+    - exam_id (required): The exam ID to check
+    - date_after (optional): ISO format date to check lectures after (default: 2025-10-16T18:00:00)
+    """
+    try:
+        # Get query parameters
+        exam_id = request.args.get('exam_id')
+        date_after = request.args.get('date_after', '2025-10-16T18:00:00')
+        
+        # Validate exam_id
+        if not exam_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'exam_id query parameter is required'
+            }), 400
+        
+        # Call the diagnostic function
+        base_table_lectures, gsi_lectures = dynamodb.diagnose_lecture_issue(exam_id, date_after)
+        
+        # Calculate differences
+        base_ids = {lec['lecture_id'] for lec in base_table_lectures}
+        gsi_ids = {lec['lecture_id'] for lec in gsi_lectures}
+        missing_from_gsi = base_ids - gsi_ids
+        
+        # Get details of missing lectures
+        missing_lecture_details = [
+            {
+                'lecture_id': lec.get('lecture_id'),
+                'title': lec.get('title'),
+                'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
+                'exam_id': lec.get('exam_id')
+            }
+            for lec in base_table_lectures 
+            if lec['lecture_id'] in missing_from_gsi
+        ]
+        
+        return jsonify({
+            'status': 'success',
+            'exam_id': exam_id,
+            'date_after': date_after,
+            'base_table_count': len(base_table_lectures),
+            'gsi_count': len(gsi_lectures),
+            'missing_from_gsi_count': len(missing_from_gsi),
+            'missing_lecture_ids': list(missing_from_gsi),
+            'missing_lecture_details': missing_lecture_details,
+            'base_table_lectures': [
+                {
+                    'lecture_id': lec.get('lecture_id'),
+                    'title': lec.get('title'),
+                    'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec')
+                } 
+                for lec in base_table_lectures
+            ],
+            'gsi_lectures': [
+                {
+                    'lecture_id': lec.get('lecture_id'),
+                    'title': lec.get('title'),
+                    'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec')
+                } 
+                for lec in gsi_lectures
+            ]
+        }), 200
+        
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+        
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
 
