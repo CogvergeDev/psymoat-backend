@@ -20,6 +20,13 @@ import cloudinary.uploader
 from cloudinary.utils import cloudinary_url
 
 
+import boto3
+from botocore.client import Config
+from botocore.exceptions import ClientError
+from werkzeug.utils import secure_filename
+
+import uuid
+
 # define IST timezone
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -78,6 +85,23 @@ app.config['JWT_COOKIE_CSRF_PROTECT'] = False # Enable & handle CSRF for stronge
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)  # Set token expiry to 1 day
 
 jwt = JWTManager(app)
+
+R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
+R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID')
+R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY')
+R2_BUCKET_NAME = os.getenv('R2_BUCKET_NAME', 'testing')
+R2_PUBLIC_URL = os.getenv('R2_PUBLIC_URL', '')
+
+
+
+s3 = boto3.client(
+    's3',
+    endpoint_url=f'https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
+    aws_access_key_id=R2_ACCESS_KEY_ID,
+    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+    config=Config(signature_version='s3v4'),
+    region_name='auto'
+)
 
 
 # TEST ROUTE
@@ -1485,6 +1509,115 @@ def diagnose_lecture_issue_route():
             'status': 'error',
             'message': f'Internal server error: {str(e)}'
         }), 500
+    
+
+# R2 stuff
+ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'}
+
+def allowed_video_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
+
+def get_video_url(key):
+    """Generate URL for accessing the video"""
+    if R2_PUBLIC_URL:
+        return f"{R2_PUBLIC_URL}/{key}"
+    else:
+        # Generate presigned URL valid for 7 days (for long-term access)
+        return s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': R2_BUCKET_NAME, 'Key': key},
+            ExpiresIn=604800  # 7 days
+        )
+
+@app.route('/upload-lecture-video', methods=['POST'])
+def upload_lecture_video():
+
+    """
+    Upload a lecture video to R2 and return the CDN URL.
+    This endpoint is called BEFORE creating the lecture in the database.
+    """
+    
+    try:
+        if 'video' not in request.files:
+            return jsonify({'error': 'No video file provided'}), 400
+        
+        file = request.files['video']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not allowed_video_file(file.filename):
+            return jsonify({
+                'error': 'Invalid file type. Allowed: mp4, avi, mov, wmv, flv, webm, mkv'
+            }), 400
+        
+        # Optional metadata from form
+        lecture_title = request.form.get('title', 'Untitled Lecture')
+        
+        # Generate unique filename
+        original_filename = secure_filename(file.filename)
+        file_ext = original_filename.rsplit('.', 1)[1].lower()
+        unique_id = str(uuid.uuid4())
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        key = f"lecture-videos/{timestamp}_{unique_id}.{file_ext}"
+        
+        # Upload to R2 with metadata
+        s3.upload_fileobj(
+            file,
+            R2_BUCKET_NAME,
+            key,
+            ExtraArgs={
+                'ContentType': f'video/{file_ext}',
+                'Metadata': {
+                    'title': lecture_title,
+                    'original_filename': original_filename,
+                    'upload_date': datetime.now().isoformat()
+                }
+            }
+        )
+        
+        # Get the CDN URL
+        video_url = get_video_url(key)
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Video uploaded successfully',
+            'video_url': video_url,
+            'video_key': key,
+            'original_filename': original_filename
+        }), 200
+        
+    except Exception as e:
+        print(f"Error uploading video: {str(e)}")
+        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+
+
+@app.route('/delete-lecture-video', methods=['DELETE'])
+def delete_lecture_video():
+    """
+    Delete a video from R2 by its key.
+    Used when user cancels or uploads a different video.
+    """
+    try:
+        data = request.get_json()
+        video_key = data.get('video_key')
+        
+        if not video_key:
+            return jsonify({'error': 'video_key is required'}), 400
+        
+        # Delete from R2
+        s3.delete_object(Bucket=R2_BUCKET_NAME, Key=video_key)
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Video deleted successfully'
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deleting video: {str(e)}")
+        return jsonify({'error': f'Delete failed: {str(e)}'}), 500
+
+
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
