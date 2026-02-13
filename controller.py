@@ -3,9 +3,11 @@
 import os
 import secrets
 import string
+import boto3
 from boto3 import resource
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import BotoCoreError, ClientError
+from botocore.client import Config
 from flask import jsonify
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import (
@@ -62,6 +64,22 @@ TestsSolvedUserDataTable = dynamodb_resource.Table('TestsSolvedUserData')
 GENZEE_TABLE = dynamodb_resource.Table('GenzeeTherapistJune')
 BlogTable = dynamodb_resource.Table('Blogs')
 
+# R2 / Cloudflare S3-compatible storage setup
+R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
+R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID')
+R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY')
+R2_BUCKET_NAME = os.getenv('R2_BUCKET_NAME', 'testing')
+R2_PUBLIC_URL = os.getenv('R2_PUBLIC_URL', '')
+
+s3_client = boto3.client(
+    's3',
+    endpoint_url=f'https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com',
+    aws_access_key_id=R2_ACCESS_KEY_ID,
+    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+    config=Config(signature_version='s3v4'),
+    region_name='auto'
+)
+
 
 def generate_id(size=6):
     return ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(size))
@@ -70,6 +88,37 @@ def generate_id(size=6):
 def get_time():
     return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
 
+
+def generate_video_url_from_key(video_key: str) -> str:
+    """
+    Generate a playable URL from a video key.
+    If R2_PUBLIC_URL is set, use public URL. Otherwise, generate presigned URL.
+    If video_key looks like a full URL (starts with http), return as-is.
+    """
+    if not video_key:
+        return video_key
+    
+    # If it's already a full URL (YouTube, old presigned URL, etc.), return as-is
+    if video_key.startswith('http://') or video_key.startswith('https://'):
+        return video_key
+    
+    # Generate URL from video key
+    if R2_PUBLIC_URL:
+        return f"{R2_PUBLIC_URL}/{video_key}"
+    
+    # Generate presigned URL for private bucket
+    try:
+        return s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': R2_BUCKET_NAME,
+                'Key': video_key,
+            },
+            ExpiresIn=3600  # 1 hour
+        )
+    except Exception as e:
+        print(f"Error generating presigned URL for {video_key}: {e}")
+        return video_key  # Return the key as fallback
 
 def generate_slug(title: str) -> str:
     """
@@ -1231,6 +1280,7 @@ def create_lecture(yt_link, category, title,
 def get_lecture_by_id(lecture_id):
     """
     Fetches a single lecture from DynamoDB by lecture_id.
+    Generates a playable video URL from the stored video key.
     Raises RuntimeError if not found or if DynamoDB fails.
     """
     try:
@@ -1240,6 +1290,11 @@ def get_lecture_by_id(lecture_id):
             raise RuntimeError(f"Lecture with id '{lecture_id}' not found.")
         # Always include notes_markdown (empty string if not present)
         item['notes_markdown'] = item.get('notes_markdown', '')
+        
+        # Generate playable URL from video key
+        if 'yt_link' in item and item['yt_link']:
+            item['yt_link'] = generate_video_url_from_key(item['yt_link'])
+        
         return item
 
     except (BotoCoreError, ClientError) as e:
@@ -1280,7 +1335,7 @@ def get_random_lectures_from_module(module_id, count=5):
                     'category': lecture.get('category'),
                     'instructor_details': lecture.get('instructor_details'),
                     'duration': lecture.get('duration', None),  # duration may not exist
-                    'yt_link': lecture.get('yt_link')
+                    'yt_link': generate_video_url_from_key(lecture.get('yt_link'))
                 })
 
         return lectures
@@ -1310,7 +1365,7 @@ def get_upcoming_lectures_for_exam(exam_id):
                 'category': lecture.get('category'),
                 'instructor_details': lecture.get('instructor_details'),
                 'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                'yt_link': lecture.get('yt_link'),
+                'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
                 'notes_markdown': lecture.get('notes_markdown', '')
             })
 
@@ -1356,7 +1411,7 @@ def get_past_lectures_for_exam(exam_id):
                     'category': lecture.get('category'),
                     'instructor_details': lecture.get('instructor_details'),
                     'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                    'yt_link': lecture.get('yt_link'),
+                    'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
                 })
             
             # Check if there are more results
@@ -1392,7 +1447,7 @@ def get_lecture_dashboard_details(exam_id):
             'category': lec.get('category'),
             'instructor_details': lec.get('instructor_details'),
             'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
-            'yt_link': lec.get('yt_link')
+            'yt_link': generate_video_url_from_key(lec.get('yt_link'))
         } for lec in upcoming_items]
 
         # Notes for upcoming lectures
@@ -1416,7 +1471,7 @@ def get_lecture_dashboard_details(exam_id):
             'category': lec.get('category'),
             'instructor_details': lec.get('instructor_details'),
             'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
-            'yt_link': lec.get('yt_link')
+            'yt_link': generate_video_url_from_key(lec.get('yt_link'))
         } for lec in past_items]
 
         return {
@@ -1474,7 +1529,7 @@ def create_mock_test(data, csv_file):
                 raise ValueError("no options found in columns Option 1–4")
 
             # c) Correct Answer
-            correct = row.get("Answer", "").strip()
+            correct = row.get("Correct Answer", "").strip()
             if not correct:
                 raise ValueError("missing 'Answer' column")
 
@@ -2122,7 +2177,7 @@ def get_all_lectures_for_exam(exam_id):
             # Return all fields just like get_lecture_by_id does
             lecture_data = {
                 'lecture_id': lecture.get('lecture_id'),
-                'yt_link': lecture.get('yt_link'),
+                'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
                 'category': lecture.get('category'),
                 'title': lecture.get('title'),
                 'instructor_details': lecture.get('instructor_details'),

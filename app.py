@@ -1,6 +1,7 @@
 # app.py
 
 from datetime import datetime, timedelta
+import mimetypes
 import os
 from flask import Flask, Response, request, jsonify
 import controller as dynamodb
@@ -209,6 +210,7 @@ def initialize_new_module():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/initialize-new-exam', methods=['POST'])
 def initialize_new_exam():
@@ -677,8 +679,10 @@ def update_lecture(lecture_id):
         return jsonify({'status': 'error', 'message': 'No valid fields provided for update.'}), 400
 
     try:
-        updated = dynamodb.update_lecture_by_id(lecture_id, update_fields)
-        return jsonify({'status': 'success', 'updated_fields': list(update_fields.keys()), 'attributes': updated}), 200
+        dynamodb.update_lecture_by_id(lecture_id, update_fields)
+        # Fetch the complete updated lecture with generated video URL
+        updated_lecture = dynamodb.get_lecture_by_id(lecture_id)
+        return jsonify({'status': 'success', 'lecture': updated_lecture}), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -1512,111 +1516,154 @@ def diagnose_lecture_issue_route():
     
 
 # R2 stuff
-ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'mkv'}
+# =========================
+# VIDEO VALIDATION
+# =========================
+
+ALLOWED_VIDEO_EXTENSIONS = {
+    "mp4", "avi", "mov", "wmv", "flv", "webm", "mkv"
+}
 
 def allowed_video_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
+    )
 
-def get_video_url(key):
-    """Generate URL for accessing the video"""
+# =========================
+# URL GENERATION (ON DEMAND)
+# =========================
+
+def get_video_url(video_key):
+    """
+    Generate a playable URL for a video key.
+    Public bucket → permanent URL
+    Private bucket → short-lived presigned URL
+    """
     if R2_PUBLIC_URL:
-        return f"{R2_PUBLIC_URL}/{key}"
-    else:
-        # Generate presigned URL valid for 7 days (for long-term access)
-        return s3.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': R2_BUCKET_NAME, 'Key': key},
-            ExpiresIn=604800  # 7 days
-        )
+        return f"{R2_PUBLIC_URL}/{video_key}"
 
-@app.route('/upload-lecture-video', methods=['POST'])
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": R2_BUCKET_NAME,
+            "Key": video_key,
+        },
+        ExpiresIn=3600,  # 1 hour (regenerate when needed)
+    )
+
+# =========================
+# UPLOAD VIDEO
+# =========================
+
+@app.route("/upload-lecture-video", methods=["POST"])
 def upload_lecture_video():
+    """
+    Upload lecture video to R2.
+    Returns ONLY the video key (permanent).
+    """
 
-    """
-    Upload a lecture video to R2 and return the CDN URL.
-    This endpoint is called BEFORE creating the lecture in the database.
-    """
-    
     try:
-        if 'video' not in request.files:
-            return jsonify({'error': 'No video file provided'}), 400
-        
-        file = request.files['video']
-        
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
+        if "video" not in request.files:
+            return jsonify({"error": "No video file provided"}), 400
+
+        file = request.files["video"]
+
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
         if not allowed_video_file(file.filename):
             return jsonify({
-                'error': 'Invalid file type. Allowed: mp4, avi, mov, wmv, flv, webm, mkv'
+                "error": "Invalid file type. Allowed: mp4, avi, mov, wmv, flv, webm, mkv"
             }), 400
-        
-        # Optional metadata from form
-        lecture_title = request.form.get('title', 'Untitled Lecture')
-        
-        # Generate unique filename
+
+        lecture_title = request.form.get("title", "Untitled Lecture")
+
         original_filename = secure_filename(file.filename)
-        file_ext = original_filename.rsplit('.', 1)[1].lower()
+        file_ext = original_filename.rsplit(".", 1)[1].lower()
+
         unique_id = str(uuid.uuid4())
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        key = f"lecture-videos/{timestamp}_{unique_id}.{file_ext}"
-        
-        # Upload to R2 with metadata
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+        video_key = f"lecture-videos/{timestamp}_{unique_id}.{file_ext}"
+
+        content_type = (
+            mimetypes.guess_type(original_filename)[0]
+            or "application/octet-stream"
+        )
+
         s3.upload_fileobj(
             file,
             R2_BUCKET_NAME,
-            key,
+            video_key,
             ExtraArgs={
-                'ContentType': f'video/{file_ext}',
-                'Metadata': {
-                    'title': lecture_title,
-                    'original_filename': original_filename,
-                    'upload_date': datetime.now().isoformat()
-                }
-            }
+                "ContentType": content_type,
+                "Metadata": {
+                    "title": lecture_title,
+                    "original_filename": original_filename,
+                    "upload_date": datetime.utcnow().isoformat(),
+                },
+            },
         )
-        
-        # Get the CDN URL
-        video_url = get_video_url(key)
-        
+
         return jsonify({
-            'status': 'success',
-            'message': 'Video uploaded successfully',
-            'video_url': video_url,
-            'video_key': key,
-            'original_filename': original_filename
+            "status": "success",
+            "message": "Video uploaded successfully",
+            "video_key": video_key,  # STORE THIS IN DB
         }), 200
-        
+
     except Exception as e:
-        print(f"Error uploading video: {str(e)}")
-        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+        print(f"Upload error: {str(e)}")
+        return jsonify({"error": "Upload failed"}), 500
 
+# =========================
+# GET PLAYABLE VIDEO URL
+# =========================
 
-@app.route('/delete-lecture-video', methods=['DELETE'])
+@app.route("/lecture-video-url/<path:video_key>", methods=["GET"])
+def lecture_video_url(video_key):
+    """
+    Generate a playable URL when frontend needs it.
+    """
+
+    try:
+        video_url = get_video_url(video_key)
+
+        return jsonify({
+            "status": "success",
+            "video_url": video_url
+        }), 200
+
+    except Exception as e:
+        print(f"URL error: {str(e)}")
+        return jsonify({"error": "Failed to generate video URL"}), 500
+
+# =========================
+# DELETE VIDEO
+# =========================
+
+@app.route("/delete-lecture-video", methods=["DELETE"])
 def delete_lecture_video():
-    """
-    Delete a video from R2 by its key.
-    Used when user cancels or uploads a different video.
-    """
     try:
         data = request.get_json()
-        video_key = data.get('video_key')
-        
-        if not video_key:
-            return jsonify({'error': 'video_key is required'}), 400
-        
-        # Delete from R2
-        s3.delete_object(Bucket=R2_BUCKET_NAME, Key=video_key)
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Video deleted successfully'
-        }), 200
-        
-    except Exception as e:
-        print(f"Error deleting video: {str(e)}")
-        return jsonify({'error': f'Delete failed: {str(e)}'}), 500
+        video_key = data.get("video_key")
 
+        if not video_key:
+            return jsonify({"error": "video_key is required"}), 400
+
+        s3.delete_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=video_key
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Video deleted successfully"
+        }), 200
+
+    except Exception as e:
+        print(f"Delete error: {str(e)}")
+        return jsonify({"error": "Delete failed"}), 500
 
 
 if __name__ == '__main__':
