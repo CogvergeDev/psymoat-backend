@@ -63,6 +63,7 @@ MockTestTable = dynamodb_resource.Table('MockTest')
 TestsSolvedUserDataTable = dynamodb_resource.Table('TestsSolvedUserData')
 GENZEE_TABLE = dynamodb_resource.Table('GenzeeTherapistJune')
 BlogTable = dynamodb_resource.Table('Blogs')
+AnnotationTable = dynamodb_resource.Table('annotations')
 
 # R2 / Cloudflare S3-compatible storage setup
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
@@ -148,6 +149,28 @@ def create_genzee_table():
         KeySchema=[{'AttributeName': 'g_payment_id', 'KeyType': 'HASH'}],
         AttributeDefinitions=[{'AttributeName': 'g_payment_id', 'AttributeType': 'S'}],
         BillingMode='PAY_PER_REQUEST'
+    )
+
+def create_annotations_table():
+    return dynamodb_resource.create_table(
+        TableName='annotations',
+        KeySchema=[{'AttributeName': 'annotation_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[
+            {'AttributeName': 'annotation_id', 'AttributeType': 'S'},
+            {'AttributeName': 'lecture_id', 'AttributeType': 'S'},
+            {'AttributeName': 'created_at', 'AttributeType': 'S'}
+        ],
+        BillingMode='PAY_PER_REQUEST',
+        GlobalSecondaryIndexes=[
+            {
+                'IndexName': 'lecture_id-index',
+                'KeySchema': [
+                    {'AttributeName': 'lecture_id', 'KeyType': 'HASH'},
+                    {'AttributeName': 'created_at', 'KeyType': 'RANGE'}
+                ],
+                'Projection': {'ProjectionType': 'ALL'}
+            }
+        ]
     )
 
 def create_blog_table():
@@ -2239,6 +2262,79 @@ def get_lectures_with_nonstandard_yt_links():
         
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"DynamoDB scan failed: {e}")
+
+
+def get_annotations_for_lecture(lecture_id, user_email):
+    items = []
+    query_kwargs = {
+        'IndexName': 'lecture_id-index',
+        'KeyConditionExpression': Key('lecture_id').eq(lecture_id)
+    }
+    while True:
+        resp = AnnotationTable.query(**query_kwargs)
+        items.extend(resp.get('Items', []))
+        if 'LastEvaluatedKey' not in resp:
+            break
+        query_kwargs['ExclusiveStartKey'] = resp['LastEvaluatedKey']
+
+    result = []
+    for item in items:
+        if item.get('user_email') == user_email:
+            item['start_offset'] = int(item['start_offset'])
+            item['end_offset'] = int(item['end_offset'])
+            result.append(item)
+    return result
+
+
+def create_annotation(lecture_id, user_email, annotation_type, start_offset, end_offset, selected_text, comment_text=None):
+    if annotation_type not in ('highlight', 'comment'):
+        raise ValueError("type must be 'highlight' or 'comment'")
+    if not isinstance(start_offset, int) or not isinstance(end_offset, int):
+        raise ValueError("start_offset and end_offset must be integers")
+    if end_offset <= start_offset:
+        raise ValueError("end_offset must be greater than start_offset")
+    if not selected_text or not selected_text.strip():
+        raise ValueError("selected_text must be a non-empty string")
+    if len(selected_text) > 2000:
+        raise ValueError("selected_text must be at most 2000 characters")
+    if annotation_type == 'comment':
+        if not comment_text or not comment_text.strip():
+            raise ValueError("comment_text is required for type 'comment'")
+        if len(comment_text) > 500:
+            raise ValueError("comment_text must be at most 500 characters")
+
+    annotation_id = generate_id(size=6)
+    created_at = datetime.now(IST).isoformat()
+
+    item = {
+        'annotation_id': annotation_id,
+        'lecture_id': lecture_id,
+        'user_email': user_email,
+        'type': annotation_type,
+        'start_offset': Decimal(start_offset),
+        'end_offset': Decimal(end_offset),
+        'selected_text': selected_text,
+        'created_at': created_at
+    }
+    if comment_text is not None:
+        item['comment_text'] = comment_text
+
+    AnnotationTable.put_item(Item=item)
+
+    item['start_offset'] = start_offset
+    item['end_offset'] = end_offset
+    return item
+
+
+def delete_annotation(annotation_id, user_email):
+    resp = AnnotationTable.get_item(Key={'annotation_id': annotation_id})
+    item = resp.get('Item')
+    if not item:
+        return None, 'not_found'
+    if item.get('user_email') != user_email:
+        return None, 'forbidden'
+    AnnotationTable.delete_item(Key={'annotation_id': annotation_id})
+    return True, 'deleted'
 
 
 def diagnose_lecture_issue(exam_id, date_after='2025-10-16T18:00:00'):

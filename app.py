@@ -190,6 +190,11 @@ def create_genzee_table_route():
     dynamodb.create_genzee_table()
     return 'Genzee Table created', 200
 
+@app.route('/create-annotations-table')
+def create_annotations_table_route():
+    dynamodb.create_annotations_table()
+    return 'Annotations Table created', 200
+
 
 # INITIALIZATION ROUTES
 @app.route('/initialize-new-module', methods=['POST'])
@@ -1664,6 +1669,63 @@ def delete_lecture_video():
     except Exception as e:
         print(f"Delete error: {str(e)}")
         return jsonify({"error": "Delete failed"}), 500
+
+
+@app.route('/get-annotations/<string:lecture_id>', methods=['GET'])
+@jwt_required()
+def get_annotations(lecture_id):
+    user_email = get_jwt_identity()
+    try:
+        annotations = dynamodb.get_annotations_for_lecture(lecture_id, user_email)
+        return jsonify({"status": "success", "data": annotations}), 200
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
+@app.route('/create-annotation', methods=['POST'])
+@jwt_required()
+def create_annotation():
+    user_email = get_jwt_identity()
+    body = request.get_json()
+
+    lecture_id = body.get("lecture_id")
+    annotation_type = body.get("type")
+    start_offset = body.get("start_offset")
+    end_offset = body.get("end_offset")
+    selected_text = body.get("selected_text")
+    comment_text = body.get("comment_text")
+
+    for field_name, value in [("lecture_id", lecture_id), ("type", annotation_type),
+                               ("start_offset", start_offset), ("end_offset", end_offset),
+                               ("selected_text", selected_text)]:
+        if value is None:
+            return jsonify({"error": f"Missing required field: {field_name}"}), 400
+
+    try:
+        result = dynamodb.create_annotation(
+            lecture_id, user_email, annotation_type,
+            int(start_offset), int(end_offset), selected_text, comment_text
+        )
+        return jsonify({"status": "success", "data": result}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
+@app.route('/delete-annotation/<string:annotation_id>', methods=['DELETE'])
+@jwt_required()
+def delete_annotation(annotation_id):
+    user_email = get_jwt_identity()
+    try:
+        _, status = dynamodb.delete_annotation(annotation_id, user_email)
+        if status == "not_found":
+            return jsonify({"error": "Annotation not found"}), 404
+        if status == "forbidden":
+            return jsonify({"error": "Forbidden"}), 403
+        return jsonify({"status": "success", "message": "Annotation deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 
 if __name__ == '__main__':
