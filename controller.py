@@ -1834,6 +1834,26 @@ def cleanup_expired_user_plans() -> dict:
         }
     
 
+def get_active_paid_users() -> dict:
+    try:
+        now_iso = datetime.now(IST).isoformat()
+        response = UserTable.scan(
+            FilterExpression=Attr('plan_valid_till').gt(now_iso),
+            ProjectionExpression="email, fullName, plan_id, plan_valid_till, exams_paid_for"
+        )
+        users = response.get('Items', [])
+        while 'LastEvaluatedKey' in response:
+            response = UserTable.scan(
+                FilterExpression=Attr('plan_valid_till').gt(now_iso),
+                ProjectionExpression="email, fullName, plan_id, plan_valid_till, exams_paid_for",
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            users.extend(response.get('Items', []))
+        return {"status": "success", "users": users, "count": len(users)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 def change_user_password(email: str, new_password: str) -> dict:
     """
     Changes the password for the user with the given email.

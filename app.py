@@ -1096,6 +1096,11 @@ def cleanup_expired_plans_route():
     result = dynamodb.cleanup_expired_user_plans()
     return jsonify(result), 200 if result.get("status") == "success" else 500
 
+@app.route('/get-active-paid-users', methods=['GET'])
+def get_active_paid_users_route():
+    result = dynamodb.get_active_paid_users()
+    return jsonify(result), 200 if result.get("status") == "success" else 500
+
 @app.route('/change-password', methods=['POST'])
 def change_password_route():
     data = request.get_json(force=True)
