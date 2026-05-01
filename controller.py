@@ -1381,6 +1381,7 @@ def get_upcoming_lectures_for_exam(exam_id):
         items = response.get('Items', [])
 
         lectures = []
+        print(items)
         for lecture in items:
             lectures.append({
                 'lecture_id': lecture.get('lecture_id'),
@@ -1389,7 +1390,8 @@ def get_upcoming_lectures_for_exam(exam_id):
                 'instructor_details': lecture.get('instructor_details'),
                 'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
                 'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
-                'notes_markdown': lecture.get('notes_markdown', '')
+                'notes_markdown': lecture.get('notes_markdown', ''),
+                'zoom_link': lecture.get('zoom_link', ''),
             })
 
         return lectures
@@ -1470,7 +1472,8 @@ def get_lecture_dashboard_details(exam_id):
             'category': lec.get('category'),
             'instructor_details': lec.get('instructor_details'),
             'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
-            'yt_link': generate_video_url_from_key(lec.get('yt_link'))
+            'yt_link': generate_video_url_from_key(lec.get('yt_link')),
+            'zoom_link': lec.get('zoom_link')
         } for lec in upcoming_items]
 
         # Notes for upcoming lectures
@@ -1850,6 +1853,91 @@ def get_active_paid_users() -> dict:
             )
             users.extend(response.get('Items', []))
         return {"status": "success", "users": users, "count": len(users)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def get_users_with_exam_paid_for_but_no_payment_fields() -> dict:
+    """
+    Returns users where:
+    - exams_paid_for exists
+    - is_paid does not exist
+    - plan_valid_till does not exist
+    """
+    try:
+        response = UserTable.scan(
+            FilterExpression=(
+                Attr('exams_paid_for').exists() &
+                Attr('is_paid').not_exists() &
+                Attr('plan_valid_till').not_exists()
+            ),
+            ProjectionExpression="email, fullName, exams_paid_for"
+        )
+        users = response.get('Items', [])
+
+        while 'LastEvaluatedKey' in response:
+            response = UserTable.scan(
+                FilterExpression=(
+                    Attr('exams_paid_for').exists() &
+                    Attr('is_paid').not_exists() &
+                    Attr('plan_valid_till').not_exists()
+                ),
+                ProjectionExpression="email, fullName, exams_paid_for",
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            users.extend(response.get('Items', []))
+
+        return {"status": "success", "users": users, "count": len(users)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def clear_payment_fields_for_users_with_exam_paid_for_no_payment_fields() -> dict:
+    """
+    Finds users where exams_paid_for exists and is_paid/plan_valid_till are missing,
+    then removes payment fields for all matched users.
+    """
+    try:
+        response = UserTable.scan(
+            FilterExpression=(
+                Attr('exams_paid_for').exists() &
+                Attr('is_paid').not_exists() &
+                Attr('plan_valid_till').not_exists()
+            ),
+            ProjectionExpression="email"
+        )
+        users = response.get('Items', [])
+
+        while 'LastEvaluatedKey' in response:
+            response = UserTable.scan(
+                FilterExpression=(
+                    Attr('exams_paid_for').exists() &
+                    Attr('is_paid').not_exists() &
+                    Attr('plan_valid_till').not_exists()
+                ),
+                ProjectionExpression="email",
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            users.extend(response.get('Items', []))
+
+        emails = [u.get('email') for u in users if u.get('email')]
+        cleared_email_ids = []
+        failed = []
+
+        for email in emails:
+            try:
+                delete_user_payment_fields(email)
+                cleared_email_ids.append(email)
+            except Exception as exc:
+                failed.append({'email': email, 'error': str(exc)})
+
+        return {
+            "status": "success" if not failed else "partial_success",
+            "cleared_email_ids": cleared_email_ids,
+            "cleared_count": len(cleared_email_ids),
+            "failed": failed,
+            "failed_count": len(failed)
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

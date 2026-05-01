@@ -1101,6 +1101,12 @@ def get_active_paid_users_route():
     result = dynamodb.get_active_paid_users()
     return jsonify(result), 200 if result.get("status") == "success" else 500
 
+
+@app.route('/get-users-with-exams-paid-for-no-payment-fields', methods=['POST'])
+def get_users_with_exams_paid_for_no_payment_fields_route():
+    result = dynamodb.clear_payment_fields_for_users_with_exam_paid_for_no_payment_fields()
+    return jsonify(result), 200 if result.get("status") in ("success", "partial_success") else 500
+
 @app.route('/change-password', methods=['POST'])
 def change_password_route():
     data = request.get_json(force=True)
