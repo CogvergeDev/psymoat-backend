@@ -121,6 +121,18 @@ def generate_video_url_from_key(video_key: str) -> str:
         print(f"Error generating presigned URL for {video_key}: {e}")
         return video_key  # Return the key as fallback
 
+def normalize_yt_link_to_key(yt_link: str) -> str:
+    """
+    If yt_link is a presigned R2 URL, strip it back to the raw object key.
+    YouTube URLs and plain keys are returned unchanged.
+    """
+    if not yt_link:
+        return yt_link
+    if 'r2.cloudflarestorage.com' in yt_link:
+        from urllib.parse import urlparse
+        return urlparse(yt_link).path.lstrip('/')
+    return yt_link
+
 def generate_slug(title: str) -> str:
     """
     Generate a URL-friendly slug from the blog title.
@@ -1210,6 +1222,10 @@ def update_lecture_by_id(lecture_id, update_fields):
     if not update_fields:
         raise ValueError("No fields to update.")
 
+    # Normalize yt_link: strip presigned R2 URLs back to raw key before storing
+    if 'yt_link' in update_fields:
+        update_fields['yt_link'] = normalize_yt_link_to_key(update_fields['yt_link'])
+
     # Special handling for date_time_of_zoom_lec: ensure ISO format
     if 'date_time_of_zoom_lec' in update_fields:
         dt = update_fields['date_time_of_zoom_lec']
@@ -1244,6 +1260,9 @@ def create_lecture(yt_link, category, title,
     """
 
     lecture_id = generate_id()
+
+    # Strip any presigned R2 URL back to the raw key before persisting
+    yt_link = normalize_yt_link_to_key(yt_link)
 
     # ✅ Normalize date_time_of_zoom_lec to ISO8601 format
     # print(date_time_of_zoom_lec)
@@ -1314,9 +1333,9 @@ def get_lecture_by_id(lecture_id):
         # Always include notes_markdown (empty string if not present)
         item['notes_markdown'] = item.get('notes_markdown', '')
         
-        # Generate playable URL from video key
+        # Generate playable URL from video key (never stored, always computed at read time)
         if 'yt_link' in item and item['yt_link']:
-            item['yt_link'] = generate_video_url_from_key(item['yt_link'])
+            item['video_url'] = generate_video_url_from_key(item['yt_link'])
         
         return item
 
@@ -1358,7 +1377,8 @@ def get_random_lectures_from_module(module_id, count=5):
                     'category': lecture.get('category'),
                     'instructor_details': lecture.get('instructor_details'),
                     'duration': lecture.get('duration', None),  # duration may not exist
-                    'yt_link': generate_video_url_from_key(lecture.get('yt_link'))
+                    'yt_link': lecture.get('yt_link'),
+                    'video_url': generate_video_url_from_key(lecture.get('yt_link'))
                 })
 
         return lectures
@@ -1389,7 +1409,8 @@ def get_upcoming_lectures_for_exam(exam_id):
                 'category': lecture.get('category'),
                 'instructor_details': lecture.get('instructor_details'),
                 'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
+                'yt_link': lecture.get('yt_link'),
+                'video_url': generate_video_url_from_key(lecture.get('yt_link')),
                 'notes_markdown': lecture.get('notes_markdown', ''),
                 'zoom_link': lecture.get('zoom_link', ''),
             })
@@ -1436,7 +1457,8 @@ def get_past_lectures_for_exam(exam_id):
                     'category': lecture.get('category'),
                     'instructor_details': lecture.get('instructor_details'),
                     'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
-                    'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
+                    'yt_link': lecture.get('yt_link'),
+                    'video_url': generate_video_url_from_key(lecture.get('yt_link')),
                 })
             
             # Check if there are more results
@@ -1472,7 +1494,8 @@ def get_lecture_dashboard_details(exam_id):
             'category': lec.get('category'),
             'instructor_details': lec.get('instructor_details'),
             'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
-            'yt_link': generate_video_url_from_key(lec.get('yt_link')),
+            'yt_link': lec.get('yt_link'),
+            'video_url': generate_video_url_from_key(lec.get('yt_link')),
             'zoom_link': lec.get('zoom_link')
         } for lec in upcoming_items]
 
@@ -1497,7 +1520,8 @@ def get_lecture_dashboard_details(exam_id):
             'category': lec.get('category'),
             'instructor_details': lec.get('instructor_details'),
             'date_time_of_zoom_lec': lec.get('date_time_of_zoom_lec'),
-            'yt_link': generate_video_url_from_key(lec.get('yt_link'))
+            'yt_link': lec.get('yt_link'),
+            'video_url': generate_video_url_from_key(lec.get('yt_link'))
         } for lec in past_items]
 
         return {
@@ -2308,7 +2332,8 @@ def get_all_lectures_for_exam(exam_id):
             # Return all fields just like get_lecture_by_id does
             lecture_data = {
                 'lecture_id': lecture.get('lecture_id'),
-                'yt_link': generate_video_url_from_key(lecture.get('yt_link')),
+                'yt_link': lecture.get('yt_link'),
+                'video_url': generate_video_url_from_key(lecture.get('yt_link')),
                 'category': lecture.get('category'),
                 'title': lecture.get('title'),
                 'instructor_details': lecture.get('instructor_details'),

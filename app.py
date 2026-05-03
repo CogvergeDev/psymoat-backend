@@ -1,8 +1,10 @@
 # app.py
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import mimetypes
 import os
+import struct
+import threading
 from flask import Flask, Response, request, jsonify
 import controller as dynamodb
 from flask_jwt_extended import JWTManager, get_jwt, jwt_required, get_jwt_identity
@@ -1572,6 +1574,31 @@ def get_video_url(video_key):
 # UPLOAD VIDEO
 # =========================
 
+@app.route('/generate-video-upload-url', methods=['POST'])
+def generate_video_upload_url():
+    data = request.get_json(force=True)
+    filename = secure_filename(data.get('filename', 'video.mp4'))
+    content_type = data.get('content_type', 'video/mp4')
+
+    file_ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'mp4'
+    if file_ext not in ALLOWED_VIDEO_EXTENSIONS:
+        return jsonify({'error': 'Invalid file type'}), 400
+
+    video_key = f"lecture-videos/{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4()}.{file_ext}"
+
+    upload_url = s3.generate_presigned_url(
+        'put_object',
+        Params={
+            'Bucket': R2_BUCKET_NAME,
+            'Key': video_key,
+            'ContentType': content_type,
+        },
+        ExpiresIn=7200  # 2 hours — enough for large uploads
+    )
+
+    return jsonify({'upload_url': upload_url, 'video_key': video_key}), 200
+
+
 @app.route("/upload-lecture-video", methods=["POST"])
 def upload_lecture_video():
     """
@@ -1680,6 +1707,167 @@ def delete_lecture_video():
     except Exception as e:
         print(f"Delete error: {str(e)}")
         return jsonify({"error": "Delete failed"}), 500
+
+
+# =========================
+# PROCESS VIDEO (faststart)
+# =========================
+
+def _read_top_level_atoms(video_key):
+    head = s3.head_object(Bucket=R2_BUCKET_NAME, Key=video_key)
+    file_size = head['ContentLength']
+    atoms = []
+    offset = 0
+    buf_start = 0
+    buf = s3.get_object(
+        Bucket=R2_BUCKET_NAME, Key=video_key,
+        Range=f'bytes=0-{min(65535, file_size - 1)}'
+    )['Body'].read()
+
+    while offset < file_size:
+        rel = offset - buf_start
+        if rel + 8 > len(buf):
+            fetch_end = min(offset + 65535, file_size - 1)
+            buf = s3.get_object(
+                Bucket=R2_BUCKET_NAME, Key=video_key,
+                Range=f'bytes={offset}-{fetch_end}'
+            )['Body'].read()
+            buf_start = offset
+            rel = 0
+        size = struct.unpack('>I', buf[rel:rel+4])[0]
+        atom_type = buf[rel+4:rel+8].decode('latin-1')
+        if size == 1:
+            size = struct.unpack('>Q', buf[rel+8:rel+16])[0]
+        if size == 0 or size < 8:
+            break
+        atoms.append({'type': atom_type, 'offset': offset, 'size': size})
+        offset += size
+
+    return atoms, file_size
+
+
+def _fix_offsets_in_moov(moov_data: bytes, delta: int) -> bytes:
+    buf = bytearray(moov_data)
+
+    def walk(start, end):
+        pos = start
+        while pos + 8 <= end:
+            size = struct.unpack('>I', bytes(buf[pos:pos+4]))[0]
+            btype = bytes(buf[pos+4:pos+8]).decode('latin-1')
+            if size < 8:
+                break
+            if btype in ('moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'udta', 'meta', 'ilst'):
+                walk(pos + 8, pos + size)
+            elif btype == 'stco':
+                count = struct.unpack('>I', bytes(buf[pos+12:pos+16]))[0]
+                for i in range(count):
+                    o = pos + 16 + i * 4
+                    val = struct.unpack('>I', bytes(buf[o:o+4]))[0]
+                    struct.pack_into('>I', buf, o, val + delta)
+            elif btype == 'co64':
+                count = struct.unpack('>I', bytes(buf[pos+12:pos+16]))[0]
+                for i in range(count):
+                    o = pos + 16 + i * 8
+                    val = struct.unpack('>Q', bytes(buf[o:o+8]))[0]
+                    struct.pack_into('>Q', buf, o, val + delta)
+            pos += size
+
+    walk(0, len(buf))
+    return bytes(buf)
+
+
+def _do_process_video(video_key):
+    try:
+        atoms, file_size = _read_top_level_atoms(video_key)
+        types = [a['type'] for a in atoms]
+
+        if 'moov' not in types:
+            print(f"process-video: no moov in {video_key}")
+            return
+
+        moov_idx = types.index('moov')
+        if moov_idx == 0 or (moov_idx == 1 and types[0] == 'ftyp'):
+            print(f"process-video: {video_key} already optimized")
+            return
+
+        moov = atoms[moov_idx]
+
+        moov_data = s3.get_object(
+            Bucket=R2_BUCKET_NAME, Key=video_key,
+            Range=f"bytes={moov['offset']}-{moov['offset'] + moov['size'] - 1}"
+        )['Body'].read()
+
+        fixed_moov = _fix_offsets_in_moov(moov_data, moov['size'])
+
+        head = s3.head_object(Bucket=R2_BUCKET_NAME, Key=video_key)
+        mpu = s3.create_multipart_upload(
+            Bucket=R2_BUCKET_NAME, Key=video_key,
+            ContentType=head.get('ContentType', 'video/mp4')
+        )
+        upload_id = mpu['UploadId']
+        parts = []
+        part_num = 1
+        CHUNK = 500 * 1024 * 1024  # 500MB per copy chunk
+
+        try:
+            # Part 1: everything before moov + fixed moov (tiny, in memory)
+            if moov['offset'] > 0:
+                pre = s3.get_object(
+                    Bucket=R2_BUCKET_NAME, Key=video_key,
+                    Range=f"bytes=0-{moov['offset'] - 1}"
+                )['Body'].read()
+                body = pre + fixed_moov
+            else:
+                body = fixed_moov
+
+            part = s3.upload_part(
+                Bucket=R2_BUCKET_NAME, Key=video_key,
+                UploadId=upload_id, PartNumber=part_num, Body=body
+            )
+            parts.append({'PartNumber': part_num, 'ETag': part['ETag']})
+            part_num += 1
+
+            # Remaining parts: server-side copy of mdat (R2 moves the bytes, not us)
+            post_start = moov['offset'] + moov['size']
+            copied = 0
+            remaining = file_size - post_start
+            while copied < remaining:
+                src_start = post_start + copied
+                src_end = min(src_start + CHUNK, file_size) - 1
+                part = s3.upload_part_copy(
+                    Bucket=R2_BUCKET_NAME, Key=video_key,
+                    UploadId=upload_id, PartNumber=part_num,
+                    CopySource={'Bucket': R2_BUCKET_NAME, 'Key': video_key},
+                    CopySourceRange=f'bytes={src_start}-{src_end}'
+                )
+                parts.append({'PartNumber': part_num, 'ETag': part['CopyPartResult']['ETag']})
+                part_num += 1
+                copied += src_end - src_start + 1
+
+            s3.complete_multipart_upload(
+                Bucket=R2_BUCKET_NAME, Key=video_key,
+                UploadId=upload_id,
+                MultipartUpload={'Parts': parts}
+            )
+            print(f"process-video: done {video_key}")
+
+        except Exception as e:
+            s3.abort_multipart_upload(Bucket=R2_BUCKET_NAME, Key=video_key, UploadId=upload_id)
+            raise
+
+    except Exception as e:
+        print(f"process-video error {video_key}: {e}")
+
+
+@app.route('/process-video', methods=['POST'])
+def process_video():
+    data = request.get_json(force=True)
+    video_key = data.get('video_key')
+    if not video_key:
+        return jsonify({'error': 'video_key is required'}), 400
+
+    threading.Thread(target=_do_process_video, args=(video_key,), daemon=True).start()
+    return jsonify({'status': 'processing'}), 202
 
 
 @app.route('/get-annotations/<string:lecture_id>', methods=['GET'])
