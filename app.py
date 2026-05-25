@@ -141,6 +141,11 @@ def create_blog_table_route():
     dynamodb.create_blog_table()
     return 'Blog Table created', 200
 
+@app.route('/create-notes-table')
+def create_notes_table_route():
+    dynamodb.create_notes_table()
+    return 'Notes Table created', 200
+
 @app.route('/create-tests-solved-table')
 def create_tests_table_route():
     dynamodb.create_test_solved_table()
@@ -1414,6 +1419,221 @@ def get_notes_by_lecture_id_route(lecture_id):
 
 
 
+@app.route('/add-standalone-note', methods=['POST'])
+@jwt_required()
+def add_standalone_note_route():
+    try:
+        data = request.get_json(force=True)
+        required_fields = ['exam_id', 'title', 'notes_markdown']
+        missing_fields = [field for field in required_fields if field not in data]
+
+        if missing_fields:
+            return jsonify({
+                'status': 'error',
+                'message': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+
+        note = dynamodb.create_standalone_note(
+            exam_id=data['exam_id'],
+            module_id=data.get('module_id', ''),
+            title=data['title'],
+            instructor_name=data.get('instructor_name', ''),
+            instructor_bio=data.get('instructor_bio', ''),
+            notes_markdown=data['notes_markdown']
+        )
+
+        return jsonify({
+            'status': 'success',
+            'note': note
+        }), 201
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/get-standalone-note/<string:note_id>', methods=['GET'])
+@jwt_required()
+def get_standalone_note_route(note_id):
+    try:
+        if not note_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'note_id is required'
+            }), 400
+
+        note = dynamodb.get_standalone_note_by_id(note_id)
+
+        return jsonify({
+            'status': 'success',
+            'note': note
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 404
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/get-standalone-notes/<string:exam_id>', methods=['GET'])
+@jwt_required()
+def get_standalone_notes_for_exam_route(exam_id):
+    try:
+        if not exam_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'exam_id is required'
+            }), 400
+
+        notes = dynamodb.get_standalone_notes_for_exam(exam_id)
+
+        return jsonify({
+            'status': 'success',
+            'notes': notes
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/update-standalone-note/<string:note_id>', methods=['PUT'])
+@jwt_required()
+def update_standalone_note_route(note_id):
+    try:
+        data = request.get_json(force=True)
+        if not note_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'note_id is required'
+            }), 400
+
+        updated_note = dynamodb.update_standalone_note_by_id(note_id, data)
+
+        return jsonify({
+            'status': 'success',
+            'note': updated_note
+        }), 200
+
+    except ValueError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 400
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 404
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/delete-standalone-note/<string:note_id>', methods=['DELETE'])
+@jwt_required()
+def delete_standalone_note_route(note_id):
+    try:
+        if not note_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'note_id is required'
+            }), 400
+
+        result = dynamodb.delete_standalone_note_by_id(note_id)
+        if result.get('status') == 'success':
+            return jsonify(result), 200
+
+        return jsonify(result), 404
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
+@app.route('/get-all-notes-v2/<string:exam_id>', methods=['GET'])
+@jwt_required()
+def get_all_notes_v2_for_exam_route(exam_id):
+    try:
+        if not exam_id:
+            return jsonify({
+                'status': 'error',
+                'message': 'exam_id is required'
+            }), 400
+
+        notes = dynamodb.get_all_notes_v2_for_exam(exam_id)
+
+        return jsonify({
+            'status': 'success',
+            'notes': notes
+        }), 200
+
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+    except (BotoCoreError, ClientError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'AWS client error: {str(e)}'
+        }), 502
+
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }), 500
+
 @app.route('/get-nonstandard-yt-lectures', methods=['GET'])
 def get_nonstandard_yt_lectures_route():
     """
@@ -1881,6 +2101,17 @@ def get_annotations(lecture_id):
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
 
+@app.route('/get-note-annotations/<string:note_id>', methods=['GET'])
+@jwt_required()
+def get_note_annotations(note_id):
+    user_email = get_jwt_identity()
+    try:
+        annotations = dynamodb.get_annotations_for_note(note_id, user_email)
+        return jsonify({"status": "success", "data": annotations}), 200
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+
 @app.route('/create-annotation', methods=['POST'])
 @jwt_required()
 def create_annotation():
@@ -1888,22 +2119,28 @@ def create_annotation():
     body = request.get_json()
 
     lecture_id = body.get("lecture_id")
+    note_id = body.get("note_id")
     annotation_type = body.get("type")
     start_offset = body.get("start_offset")
     end_offset = body.get("end_offset")
     selected_text = body.get("selected_text")
     comment_text = body.get("comment_text")
 
-    for field_name, value in [("lecture_id", lecture_id), ("type", annotation_type),
-                               ("start_offset", start_offset), ("end_offset", end_offset),
-                               ("selected_text", selected_text)]:
+    if not lecture_id and not note_id:
+        return jsonify({"error": "Either lecture_id or note_id is required"}), 400
+    if lecture_id and note_id:
+        return jsonify({"error": "Provide only one of lecture_id or note_id"}), 400
+
+    for field_name, value in [("type", annotation_type), ("start_offset", start_offset),
+                               ("end_offset", end_offset), ("selected_text", selected_text)]:
         if value is None:
             return jsonify({"error": f"Missing required field: {field_name}"}), 400
 
     try:
         result = dynamodb.create_annotation(
             lecture_id, user_email, annotation_type,
-            int(start_offset), int(end_offset), selected_text, comment_text
+            int(start_offset), int(end_offset), selected_text, comment_text,
+            note_id=note_id
         )
         return jsonify({"status": "success", "data": result}), 201
     except ValueError as e:
@@ -1970,4 +2207,3 @@ if __name__ == '__main__':
 #             'status': 'error',
 #             'message': f'Internal server error: {str(e)}'
 #         }), 500
-

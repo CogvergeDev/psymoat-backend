@@ -64,6 +64,7 @@ TestsSolvedUserDataTable = dynamodb_resource.Table('TestsSolvedUserData')
 GENZEE_TABLE = dynamodb_resource.Table('GenzeeTherapistJune')
 BlogTable = dynamodb_resource.Table('Blogs')
 AnnotationTable = dynamodb_resource.Table('annotations')
+NotesTable = dynamodb_resource.Table('Notes')
 
 # R2 / Cloudflare S3-compatible storage setup
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
@@ -170,6 +171,7 @@ def create_annotations_table():
         AttributeDefinitions=[
             {'AttributeName': 'annotation_id', 'AttributeType': 'S'},
             {'AttributeName': 'lecture_id', 'AttributeType': 'S'},
+            {'AttributeName': 'note_id', 'AttributeType': 'S'},
             {'AttributeName': 'created_at', 'AttributeType': 'S'}
         ],
         BillingMode='PAY_PER_REQUEST',
@@ -178,6 +180,14 @@ def create_annotations_table():
                 'IndexName': 'lecture_id-index',
                 'KeySchema': [
                     {'AttributeName': 'lecture_id', 'KeyType': 'HASH'},
+                    {'AttributeName': 'created_at', 'KeyType': 'RANGE'}
+                ],
+                'Projection': {'ProjectionType': 'ALL'}
+            },
+            {
+                'IndexName': 'note_id-index',
+                'KeySchema': [
+                    {'AttributeName': 'note_id', 'KeyType': 'HASH'},
                     {'AttributeName': 'created_at', 'KeyType': 'RANGE'}
                 ],
                 'Projection': {'ProjectionType': 'ALL'}
@@ -191,6 +201,28 @@ def create_blog_table():
         KeySchema=[{'AttributeName': 'blog_id', 'KeyType': 'HASH'}],
         AttributeDefinitions=[{'AttributeName': 'blog_id', 'AttributeType': 'S'}],
         BillingMode='PAY_PER_REQUEST'
+    )
+
+def create_notes_table():
+    return dynamodb_resource.create_table(
+        TableName='Notes',
+        KeySchema=[{'AttributeName': 'note_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[
+            {'AttributeName': 'note_id', 'AttributeType': 'S'},
+            {'AttributeName': 'exam_id', 'AttributeType': 'S'},
+            {'AttributeName': 'created_at', 'AttributeType': 'S'}
+        ],
+        BillingMode='PAY_PER_REQUEST',
+        GlobalSecondaryIndexes=[
+            {
+                'IndexName': 'exam_id-created_at-index',
+                'KeySchema': [
+                    {'AttributeName': 'exam_id', 'KeyType': 'HASH'},
+                    {'AttributeName': 'created_at', 'KeyType': 'RANGE'}
+                ],
+                'Projection': {'ProjectionType': 'ALL'}
+            }
+        ]
     )
 
 def create_user_table():
@@ -1499,12 +1531,13 @@ def get_lecture_dashboard_details(exam_id):
             'zoom_link': lec.get('zoom_link')
         } for lec in upcoming_items]
 
-        # Notes for upcoming lectures
-        notes = [{
-            'lecture_id': lec.get('lecture_id'),
-            'title': lec.get('title'),
-            'instructor': lec.get('instructor_details')
-        } for lec in upcoming_items]
+        # Latest notes can come from standalone notes or legacy lecture notes.
+        combined_notes = get_all_notes_v2_for_exam(exam_id)
+        notes = sorted(
+            combined_notes,
+            key=lambda note: note.get('created_at') or note.get('date_time_of_zoom_lec') or '',
+            reverse=True
+        )[:2]
 
         # Past lectures (older dates)
         past_response = LectureTable.query(
@@ -2305,6 +2338,196 @@ def get_notes_by_lecture_id(lecture_id):
     except (BotoCoreError, ClientError) as e:
         raise RuntimeError(f"Failed to fetch from DynamoDB: {e}")
 
+def create_standalone_note(
+    exam_id,
+    title,
+    notes_markdown,
+    module_id='',
+    instructor_name='',
+    instructor_bio=''
+):
+    """
+    Creates a standalone note that is not linked to any lecture.
+    """
+    try:
+        now = datetime.now(IST).replace(microsecond=0).isoformat()
+        item = {
+            'note_id': generate_id(),
+            'exam_id': exam_id,
+            'module_id': module_id or '',
+            'title': title,
+            'instructor_name': instructor_name or '',
+            'instructor_bio': instructor_bio or '',
+            'notes_markdown': notes_markdown,
+            'source': 'standalone',
+            'created_at': now,
+            'updated_at': now
+        }
+
+        NotesTable.put_item(Item=item)
+        return item
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to create standalone note: {e}")
+
+def get_standalone_note_by_id(note_id):
+    """
+    Fetches a single standalone note by note_id.
+    """
+    try:
+        response = NotesTable.get_item(Key={'note_id': note_id})
+        item = response.get('Item')
+        if not item:
+            raise RuntimeError(f"Standalone note with id '{note_id}' not found.")
+        return item
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to fetch standalone note: {e}")
+
+def get_standalone_notes_for_exam(exam_id):
+    """
+    Returns all standalone notes for a given exam_id.
+    """
+    try:
+        response = NotesTable.query(
+            IndexName='exam_id-created_at-index',
+            KeyConditionExpression=Key('exam_id').eq(exam_id),
+            ScanIndexForward=False
+        )
+
+        items = response.get('Items', [])
+
+        while 'LastEvaluatedKey' in response:
+            response = NotesTable.query(
+                IndexName='exam_id-created_at-index',
+                KeyConditionExpression=Key('exam_id').eq(exam_id),
+                ExclusiveStartKey=response['LastEvaluatedKey'],
+                ScanIndexForward=False
+            )
+            items.extend(response.get('Items', []))
+
+        return items
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to fetch standalone notes: {e}")
+
+def update_standalone_note_by_id(note_id, update_fields):
+    """
+    Updates editable fields on a standalone note.
+    """
+    allowed_fields = {
+        'exam_id',
+        'module_id',
+        'title',
+        'instructor_name',
+        'instructor_bio',
+        'notes_markdown'
+    }
+    update_fields = {
+        key: value
+        for key, value in update_fields.items()
+        if key in allowed_fields
+    }
+
+    if not update_fields:
+        raise ValueError("No valid fields provided for update.")
+
+    update_fields['updated_at'] = datetime.now(IST).replace(microsecond=0).isoformat()
+    update_expr = "SET " + ", ".join([f"{key} = :{key}" for key in update_fields])
+    expr_attr_vals = {f":{key}": value for key, value in update_fields.items()}
+
+    try:
+        response = NotesTable.update_item(
+            Key={'note_id': note_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=expr_attr_vals,
+            ConditionExpression=Attr('note_id').exists(),
+            ReturnValues='ALL_NEW'
+        )
+        return response.get('Attributes', {})
+
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            raise RuntimeError(f"Standalone note with id '{note_id}' not found.")
+        raise RuntimeError(f"Failed to update standalone note: {e}")
+    except BotoCoreError as e:
+        raise RuntimeError(f"Failed to update standalone note: {e}")
+
+def delete_standalone_note_by_id(note_id):
+    """
+    Deletes a standalone note by note_id.
+    """
+    try:
+        NotesTable.delete_item(
+            Key={'note_id': note_id},
+            ConditionExpression=Attr('note_id').exists()
+        )
+        return {'status': 'success', 'message': f'Standalone note {note_id} deleted.'}
+
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return {'status': 'error', 'message': f"Standalone note with id '{note_id}' not found."}
+        return {'status': 'error', 'message': f'Failed to delete standalone note: {e}'}
+    except BotoCoreError as e:
+        return {'status': 'error', 'message': f'Failed to delete standalone note: {e}'}
+
+def get_all_notes_v2_for_exam(exam_id):
+    """
+    Returns legacy lecture notes plus new standalone notes for an exam.
+    """
+    try:
+        response = LectureTable.query(
+            IndexName='ExamUpcomingLecturesIndex',
+            KeyConditionExpression=Key('exam_id').eq(exam_id)
+        )
+
+        lecture_items = response.get('Items', [])
+
+        while 'LastEvaluatedKey' in response:
+            response = LectureTable.query(
+                IndexName='ExamUpcomingLecturesIndex',
+                KeyConditionExpression=Key('exam_id').eq(exam_id),
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            lecture_items.extend(response.get('Items', []))
+
+        notes = []
+        for lecture in lecture_items:
+            notes_markdown = lecture.get('notes_markdown', '')
+            if notes_markdown.strip():
+                notes.append({
+                    'source': 'lecture',
+                    'note_id': None,
+                    'lecture_id': lecture.get('lecture_id'),
+                    'exam_id': lecture.get('exam_id'),
+                    'module_id': lecture.get('module_id'),
+                    'title': lecture.get('title'),
+                    'instructor_details': lecture.get('instructor_details'),
+                    'date_time_of_zoom_lec': lecture.get('date_time_of_zoom_lec'),
+                    'created_at': lecture.get('created_at'),
+                    'notes_markdown': notes_markdown
+                })
+
+        for note in get_standalone_notes_for_exam(exam_id):
+            notes.append({
+                'source': 'standalone',
+                'note_id': note.get('note_id'),
+                'lecture_id': None,
+                'exam_id': note.get('exam_id'),
+                'module_id': note.get('module_id', ''),
+                'title': note.get('title'),
+                'instructor_name': note.get('instructor_name', ''),
+                'instructor_bio': note.get('instructor_bio', ''),
+                'notes_markdown': note.get('notes_markdown', ''),
+                'created_at': note.get('created_at'),
+                'updated_at': note.get('updated_at')
+            })
+
+        return notes
+
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Failed to fetch notes: {e}")
+
 def get_all_lectures_for_exam(exam_id):
     """
     Query GSI to return all lectures (both past and upcoming) for a given exam_id.
@@ -2419,7 +2642,38 @@ def get_annotations_for_lecture(lecture_id, user_email):
     return result
 
 
-def create_annotation(lecture_id, user_email, annotation_type, start_offset, end_offset, selected_text, comment_text=None):
+def get_annotations_for_note(note_id, user_email):
+    items = []
+    scan_kwargs = {
+        'FilterExpression': Attr('note_id').eq(note_id) & Attr('user_email').eq(user_email)
+    }
+    while True:
+        resp = AnnotationTable.scan(**scan_kwargs)
+        items.extend(resp.get('Items', []))
+        if 'LastEvaluatedKey' not in resp:
+            break
+        scan_kwargs['ExclusiveStartKey'] = resp['LastEvaluatedKey']
+
+    for item in items:
+        item['start_offset'] = int(item['start_offset'])
+        item['end_offset'] = int(item['end_offset'])
+    return items
+
+
+def create_annotation(
+    lecture_id,
+    user_email,
+    annotation_type,
+    start_offset,
+    end_offset,
+    selected_text,
+    comment_text=None,
+    note_id=None
+):
+    if not lecture_id and not note_id:
+        raise ValueError("Either lecture_id or note_id is required")
+    if lecture_id and note_id:
+        raise ValueError("Provide only one of lecture_id or note_id")
     if annotation_type not in ('highlight', 'comment'):
         raise ValueError("type must be 'highlight' or 'comment'")
     if not isinstance(start_offset, int) or not isinstance(end_offset, int):
@@ -2441,7 +2695,6 @@ def create_annotation(lecture_id, user_email, annotation_type, start_offset, end
 
     item = {
         'annotation_id': annotation_id,
-        'lecture_id': lecture_id,
         'user_email': user_email,
         'type': annotation_type,
         'start_offset': Decimal(start_offset),
@@ -2449,6 +2702,12 @@ def create_annotation(lecture_id, user_email, annotation_type, start_offset, end
         'selected_text': selected_text,
         'created_at': created_at
     }
+    if lecture_id:
+        item['lecture_id'] = lecture_id
+        item['source'] = 'lecture'
+    if note_id:
+        item['note_id'] = note_id
+        item['source'] = 'standalone'
     if comment_text is not None:
         item['comment_text'] = comment_text
 
