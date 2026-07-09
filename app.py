@@ -537,7 +537,14 @@ def complete_razorpay_order():
     created_at = datetime.now(IST).isoformat()
     user_email = get_jwt_identity()
     exams_ids = data.get('exam_ids')
-    months = data.get('months')
+    try:
+        months = int(data.get('months') or 6)
+        if months <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({
+            'error': 'The "months" field must be a positive integer.'
+        }), 400
 
     missing = [k for k in ('payment_id','order_id','signature') if not data.get(k)]
     if missing:
@@ -1278,6 +1285,34 @@ def admin_get_user_route():
     result = dynamodb.admin_get_user(email)
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status
+
+
+@app.route('/admin/payment-history', methods=['POST'])
+def admin_payment_history_route():
+    data = request.get_json(silent=True) or {}
+    email = data.get('email')
+
+    if not isinstance(email, str) or not email.strip():
+        return jsonify({
+            'status': 'error',
+            'message': 'email is required'
+        }), 400
+
+    email = email.strip().lower()
+
+    try:
+        payments = dynamodb.get_user_payment_history(email)
+        return jsonify({
+            'status': 'success',
+            'email': email,
+            'payment_count': len(payments),
+            'payments': payments
+        }), 200
+    except RuntimeError as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 
 

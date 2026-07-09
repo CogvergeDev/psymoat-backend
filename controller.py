@@ -1007,9 +1007,13 @@ def save_successful_payment(payment_data: dict) -> dict:
     2) Update the user in UserTable:
        - mark is_paid = True
        - set plan_id
-       - set plan_valid_till = now + 1 month
+       - set plan_valid_till using the purchased duration
        - update exams_paid_for if plan_id matches
     """
+    months = int(payment_data.get('months') or 6)
+    if months <= 0:
+        raise ValueError("Payment duration must be a positive number of months")
+
     # 1) record the payment
     
     PaymentHistoryTable.put_item(Item={
@@ -1020,13 +1024,13 @@ def save_successful_payment(payment_data: dict) -> dict:
         'signature':    payment_data['signature'],
         'user_email':   payment_data['user_email'],
         'plan_id':      payment_data['plan_id'],
-        'months':       payment_data['months'],
+        'months':       months,
         'status':       'captured',
     })
 
 
-    # 2) compute expiry exactly one month from now
-    expiry_dt  = datetime.now(IST) + relativedelta(payment_data['months'] or 6)
+    # 2) compute expiry using the purchased duration
+    expiry_dt  = datetime.now(IST) + relativedelta(months=months)
     expiry_iso = expiry_dt.isoformat()
 
     # 3) Prepare exams_paid_for logic
@@ -1123,19 +1127,40 @@ def delete_user_payment_fields(email: str) -> dict:
     
 
 
-def get_user_payment_history(user_id: str) -> list:
+def get_user_payment_history(email: str) -> list:
     """
-    Get all payment history for a specific user
+    Get all stored payment history for a specific email.
+
+    PaymentHistoryTable currently has only payment_id as its key, so this uses
+    a paginated scan until a user_email GSI is added.
     """
     try:
-        response = PaymentHistoryTable.query(
-            IndexName='user_id-index',
-            KeyConditionExpression='user_id = :uid',
-            ExpressionAttributeValues={
-                ':uid': user_id
+        scan_kwargs = {
+            'FilterExpression': Attr('user_email').eq(email),
+            'ProjectionExpression': (
+                'payment_id, order_id, amount, plan_id, created_at, '
+                '#payment_status, months, error_code, error_desc'
+            ),
+            'ExpressionAttributeNames': {
+                '#payment_status': 'status'
             }
+        }
+        payments = []
+
+        while True:
+            response = PaymentHistoryTable.scan(**scan_kwargs)
+            payments.extend(response.get('Items', []))
+
+            last_evaluated_key = response.get('LastEvaluatedKey')
+            if not last_evaluated_key:
+                break
+            scan_kwargs['ExclusiveStartKey'] = last_evaluated_key
+
+        payments.sort(
+            key=lambda payment: payment.get('created_at', ''),
+            reverse=True
         )
-        return response.get('Items', [])
+        return payments
     except Exception as e:
         raise RuntimeError(f"Failed to fetch payment history: {e}")
 
