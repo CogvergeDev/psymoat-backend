@@ -1029,8 +1029,27 @@ def save_successful_payment(payment_data: dict) -> dict:
     })
 
 
-    # 2) compute expiry using the purchased duration
-    expiry_dt  = datetime.now(IST) + relativedelta(months=months)
+    # 2) Extend an active subscription instead of discarding its remaining time.
+    # Expired subscriptions start again from the current time.
+    now = datetime.now(IST)
+    user_resp = UserTable.get_item(Key={'email': payment_data['user_email']})
+    user = user_resp.get('Item', {})
+    expiry_base = now
+    current_expiry_value = user.get('plan_valid_till')
+    current_is_paid = user.get('is_paid') in (True, 'true', 'True', 1)
+    if current_is_paid and current_expiry_value:
+        try:
+            current_expiry = parser.parse(str(current_expiry_value).rstrip('Z'))
+            if current_expiry.tzinfo is None:
+                current_expiry = current_expiry.replace(tzinfo=IST)
+            else:
+                current_expiry = current_expiry.astimezone(IST)
+            if current_expiry > now:
+                expiry_base = current_expiry
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+    expiry_dt  = expiry_base + relativedelta(months=months)
     expiry_iso = expiry_dt.isoformat()
 
     # 3) Prepare exams_paid_for logic
@@ -1051,9 +1070,6 @@ def save_successful_payment(payment_data: dict) -> dict:
 
     # Only update exams_paid_for for specific plans
     if plan_id in ( "cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1"):
-        # Fetch current exams_paid_for
-        user_resp = UserTable.get_item(Key={'email': payment_data['user_email']})
-        user = user_resp.get('Item', {})
         current_exams = user.get('exams_paid_for', [])
         to_add = []
         if plan_id == 'cuet_pg_trainer_v1' and exam_ids:
@@ -1864,7 +1880,8 @@ def get_users_by_plan(plan_id: str) -> list:
 
 def cleanup_expired_user_plans() -> dict:
     """
-    Scans all users and removes is_paid, plan_id, plan_valid_till if plan_valid_till < now (IST).
+    Scans all users and removes active subscription fields and entitlements
+    if plan_valid_till < now (IST).
     Returns a summary dict including total RCU consumed.
     """
     try:
@@ -1901,7 +1918,7 @@ def cleanup_expired_user_plans() -> dict:
             if expiry_ist < now:
                 update_resp = UserTable.update_item(
                     Key={'email': user['email']},
-                    UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till",
+                    UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for",
                     ReturnConsumedCapacity='TOTAL'
                 )
                 total_rcu += update_resp.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
