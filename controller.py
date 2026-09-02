@@ -65,6 +65,9 @@ GENZEE_TABLE = dynamodb_resource.Table('GenzeeTherapistJune')
 BlogTable = dynamodb_resource.Table('Blogs')
 AnnotationTable = dynamodb_resource.Table('annotations')
 NotesTable = dynamodb_resource.Table('Notes')
+# One record per user per IST calendar day.  Keeping activity outside the User
+# item prevents the user profile record from growing indefinitely.
+UserActivityTable = dynamodb_resource.Table('UserActivity')
 
 # R2 / Cloudflare S3-compatible storage setup
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
@@ -231,6 +234,22 @@ def create_user_table():
         KeySchema=[{'AttributeName': 'email', 'KeyType': 'HASH'}],
         AttributeDefinitions=[{'AttributeName': 'email', 'AttributeType': 'S'}],
         ProvisionedThroughput={'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
+    )
+
+
+def create_user_activity_table():
+    """Create the daily activity table used by the streak and heatmap feature."""
+    return dynamodb_resource.create_table(
+        TableName='UserActivity',
+        KeySchema=[
+            {'AttributeName': 'email', 'KeyType': 'HASH'},
+            {'AttributeName': 'activity_date', 'KeyType': 'RANGE'}
+        ],
+        AttributeDefinitions=[
+            {'AttributeName': 'email', 'AttributeType': 'S'},
+            {'AttributeName': 'activity_date', 'AttributeType': 'S'}
+        ],
+        BillingMode='PAY_PER_REQUEST'
     )
 
 def create_mock_test_table():
@@ -701,6 +720,13 @@ def submit_questions(data, user):
             },
             ReturnValues="UPDATED_NEW"
         )
+
+        # Count the submitted answer records, not the client-provided difficulty
+        # totals, so the activity map always reflects actual answered questions.
+        record_question_activity(
+            email=data["email"],
+            questions_completed=len(data.get("detailed_user_qna", [])),
+        )
     except Exception as e:
         return {"status": "error", "message": f"Error saving QnA or updating user: {e}"}
 
@@ -868,6 +894,135 @@ def get_user(email):
         return user
     except Exception as e:
         return {'error': 'An unexpected error occurred', 'details': str(e)}
+
+
+# USER ACTIVITY / STREAKS
+ACTIVITY_TIMEZONE = "Asia/Kolkata"
+STREAK_DAILY_QUESTION_GOAL = 20
+
+
+def get_activity_intensity(questions_completed: int) -> int:
+    """Map a day's completed-question count to one of four heatmap shades."""
+    if questions_completed >= 80:
+        return 4
+    if questions_completed >= 60:
+        return 3
+    if questions_completed >= 40:
+        return 2
+    if questions_completed >= 20:
+        return 1
+    return 0
+
+
+def record_question_activity(email: str, questions_completed: int) -> None:
+    """Atomically add a completed question-set submission to today's activity."""
+    if questions_completed <= 0:
+        return
+
+    activity_date = datetime.now(IST).date().isoformat()
+    updated_at = datetime.now(IST).isoformat(timespec='seconds')
+
+    UserActivityTable.update_item(
+        Key={
+            'email': email,
+            'activity_date': activity_date,
+        },
+        UpdateExpression=(
+            'SET updated_at = :updated_at '
+            'ADD questions_completed :questions_completed, sets_completed :sets_completed'
+        ),
+        ExpressionAttributeValues={
+            ':updated_at': updated_at,
+            ':questions_completed': questions_completed,
+            ':sets_completed': 1,
+        },
+    )
+
+
+def get_user_activity_summary(email: str, days: int = 365) -> dict:
+    """Return daily heatmap data and streak statistics for the authenticated user.
+
+    The activity table has one item per user and IST calendar date. Missing dates
+    are intentionally omitted; the client renders those as empty heatmap cells.
+    """
+    today = datetime.now(IST).date()
+    start_date = today - timedelta(days=days - 1)
+
+    query_args = {
+        'KeyConditionExpression': (
+            Key('email').eq(email)
+            & Key('activity_date').between(start_date.isoformat(), today.isoformat())
+        )
+    }
+
+    activity_items = []
+    while True:
+        response = UserActivityTable.query(**query_args)
+        activity_items.extend(response.get('Items', []))
+
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        query_args['ExclusiveStartKey'] = last_key
+
+    activity_by_date = {}
+    for item in activity_items:
+        activity_date = item.get('activity_date')
+        if not activity_date:
+            continue
+
+        questions_completed = int(item.get('questions_completed', 0))
+        activity_by_date[activity_date] = questions_completed
+
+    activity = [
+        {
+            'date': activity_date,
+            'questions_completed': questions_completed,
+            'intensity': get_activity_intensity(questions_completed),
+        }
+        for activity_date, questions_completed in sorted(activity_by_date.items())
+        if questions_completed > 0
+    ]
+
+    daily_questions = [
+        activity_by_date.get((start_date + timedelta(days=offset)).isoformat(), 0)
+        for offset in range(days)
+    ]
+
+    active_days = sum(questions > 0 for questions in daily_questions)
+    total_questions_completed = sum(daily_questions)
+
+    longest_streak = 0
+    running_streak = 0
+    for questions_completed in daily_questions:
+        if questions_completed >= STREAK_DAILY_QUESTION_GOAL:
+            running_streak += 1
+            longest_streak = max(longest_streak, running_streak)
+        else:
+            running_streak = 0
+
+    current_streak = 0
+    streak_date = today
+    while streak_date >= start_date:
+        if activity_by_date.get(streak_date.isoformat(), 0) < STREAK_DAILY_QUESTION_GOAL:
+            break
+        current_streak += 1
+        streak_date -= timedelta(days=1)
+
+    return {
+        'summary': {
+            'start_date': start_date.isoformat(),
+            'end_date': today.isoformat(),
+            'days': days,
+            'timezone': ACTIVITY_TIMEZONE,
+            'streak_daily_question_goal': STREAK_DAILY_QUESTION_GOAL,
+            'total_questions_completed': total_questions_completed,
+            'active_days': active_days,
+            'current_streak': current_streak,
+            'longest_streak': longest_streak,
+        },
+        'activity': activity,
+    }
 
 def admin_get_user(email: str) -> dict:
     """
@@ -1737,6 +1892,10 @@ def submit_mock_test_controller(user_email, data):
         if user_email != request_email:
             return {"msg": "Unauthorized. Email mismatch."}, 401
 
+        detailed_qna = data.get('detailed_user_test_qna', [])
+        if not isinstance(detailed_qna, list):
+            return {"msg": "detailed_user_test_qna must be a list"}, 400
+
         # Check if user exists in TestsSolvedUserDataTable
         response = TestsSolvedUserDataTable.get_item(Key={'email': user_email})
         item = response.get('Item')
@@ -1784,6 +1943,17 @@ def submit_mock_test_controller(user_email, data):
             )
         except ClientError as e:
             return {"msg": "Failed to update UserTable", "error": str(e)}, 500
+
+        # A mock test payload contains every test question, including unanswered
+        # ones. Only questions with a selected answer contribute to activity.
+        answered_questions = sum(
+            1 for qna_entry in detailed_qna
+            if isinstance(qna_entry, dict) and qna_entry.get('selected_answer')
+        )
+        record_question_activity(
+            email=user_email,
+            questions_completed=answered_questions,
+        )
 
         return {"msg": "Mock test submitted successfully."}, 200
 

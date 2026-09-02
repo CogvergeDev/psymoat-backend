@@ -423,6 +423,29 @@ def get_user():
         return jsonify({'msg': 'Some error occurred', 'error': str(e)}), 500
 
 
+@app.route('/user-activity', methods=['GET'])
+@jwt_required()
+def get_user_activity():
+    """Return the authenticated user's daily activity map and streak summary."""
+    days_param = request.args.get('days', '365')
+    try:
+        days = int(days_param)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'days must be an integer between 1 and 365'}), 400
+
+    if not 1 <= days <= 365:
+        return jsonify({'error': 'days must be an integer between 1 and 365'}), 400
+
+    try:
+        email = get_jwt_identity()
+        response = dynamodb.get_user_activity_summary(email, days)
+        return jsonify(response), 200
+    except (ClientError, BotoCoreError) as e:
+        return jsonify({'error': 'Failed to retrieve user activity', 'details': str(e)}), 500
+    except Exception as e:
+        return jsonify({'error': 'Failed to retrieve user activity', 'details': str(e)}), 500
+
+
 # AUTH ROUTES
 @app.route('/register', methods=['POST'])
 def register():
