@@ -688,15 +688,25 @@ def submit_questions(data, user):
         if qid not in wrong_list:
             wrong_list.append(qid)
 
+    # ─── 5b. updating sets_time_taken ────────────────────────────────────────
+    set_time_taken = int(data.get("time_taken", 0))
+    user.setdefault("sets_time_taken", {})
+    user["sets_time_taken"].setdefault(exam_id, {})
+    user["sets_time_taken"][exam_id].setdefault(module_id, {})
+    user["sets_time_taken"][exam_id][module_id][str(completed_idx)] = set_time_taken
+
     # ─── 6. save QnA history & persist user ───────────────────────────────────
     try:
         for qna_entry in data.get("detailed_user_qna", []):
+            q_time_taken = int(qna_entry.get("time_taken", 0))
             qna_entry.update({
-                "email":     data["email"],
-                "qna_id":    generate_id(6),
-                "exam_id":   exam_id,
-                "module_id": module_id,
-                "timestamp": get_time()
+                "email":          data["email"],
+                "qna_id":         generate_id(6),
+                "exam_id":        exam_id,
+                "module_id":      module_id,
+                "timestamp":      get_time(),
+                "time_taken":     q_time_taken,
+                "set_time_taken": set_time_taken,
             })
             QNAHistoryTable.put_item(Item=qna_entry)
 
@@ -708,7 +718,8 @@ def submit_questions(data, user):
                 "data_graph_leetcode_accuracy = :l, "
                 "data_graph_modulewise = :m, "
                 "solved_wrong = :w, "
-                "likelyhood_clearing_value = :lc"
+                "likelyhood_clearing_value = :lc, "
+                "sets_time_taken = :stt"
             ),
             ExpressionAttributeValues={
                 ":e": user["examsTaken"],
@@ -717,6 +728,7 @@ def submit_questions(data, user):
                 ":m": user["data_graph_modulewise"],
                 ":w": user["solved_wrong"],
                 ":lc": likelyhood_clearing_value,
+                ":stt": user["sets_time_taken"],
             },
             ReturnValues="UPDATED_NEW"
         )
@@ -726,6 +738,7 @@ def submit_questions(data, user):
         record_question_activity(
             email=data["email"],
             questions_completed=len(data.get("detailed_user_qna", [])),
+            time_taken=set_time_taken,
         )
     except Exception as e:
         return {"status": "error", "message": f"Error saving QnA or updating user: {e}"}
@@ -914,7 +927,7 @@ def get_activity_intensity(questions_completed: int) -> int:
     return 0
 
 
-def record_question_activity(email: str, questions_completed: int) -> None:
+def record_question_activity(email: str, questions_completed: int, time_taken: int = 0) -> None:
     """Atomically add a completed question-set submission to today's activity."""
     if questions_completed <= 0:
         return
@@ -929,12 +942,13 @@ def record_question_activity(email: str, questions_completed: int) -> None:
         },
         UpdateExpression=(
             'SET updated_at = :updated_at '
-            'ADD questions_completed :questions_completed, sets_completed :sets_completed'
+            'ADD questions_completed :questions_completed, sets_completed :sets_completed, time_taken :time_taken'
         ),
         ExpressionAttributeValues={
             ':updated_at': updated_at,
             ':questions_completed': questions_completed,
             ':sets_completed': 1,
+            ':time_taken': int(time_taken),
         },
     )
 
