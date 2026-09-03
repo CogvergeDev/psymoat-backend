@@ -1903,7 +1903,9 @@ def get_mock_test(test_id):
 def submit_mock_test_controller(user_email, data):
     try:
         request_email = data.get('email')
-        if user_email != request_email:
+        if not request_email:
+            data['email'] = user_email
+        elif user_email.strip().lower() != request_email.strip().lower():
             return {"msg": "Unauthorized. Email mismatch."}, 401
 
         detailed_qna = data.get('detailed_user_test_qna', [])
@@ -2284,12 +2286,52 @@ def remove_graphs_all_users() -> dict:
         return {"status": "error", "message": str(e)}
     
 def get_user_test_data(email):
-
     try:
-        resp = TestsSolvedUserDataTable.get_item(Key={'email': email}, ProjectionExpression='tests_submitted')
-        if 'Item' not in resp:
-            return {'error': 'User not found'}, 404
-        return resp['Item'].get('tests_submitted', [])
+        email_candidates = list(dict.fromkeys([email, email.strip().lower()]))
+        detailed_attempts = []
+        summary_attempts = []
+
+        for candidate in email_candidates:
+            detailed_response = TestsSolvedUserDataTable.get_item(
+                Key={'email': candidate},
+                ProjectionExpression='tests_submitted',
+                ConsistentRead=True,
+            )
+            detailed_attempts.extend(
+                detailed_response.get('Item', {}).get('tests_submitted', [])
+            )
+
+            summary_response = UserTable.get_item(
+                Key={'email': candidate},
+                ProjectionExpression='tests_submitted',
+                ConsistentRead=True,
+            )
+            summary_attempts.extend(
+                summary_response.get('Item', {}).get('tests_submitted', [])
+            )
+
+        # Summary entries make historical attempts visible; detailed entries
+        # with the same identity are layered on top so review data is retained.
+        attempts_by_key = {}
+        for attempt in summary_attempts + detailed_attempts:
+            if not isinstance(attempt, dict):
+                continue
+            test_id = str(attempt.get('test_id') or attempt.get('testId') or attempt.get('id') or '').strip()
+            if not test_id:
+                continue
+            timestamp = str(
+                attempt.get('timestamp')
+                or attempt.get('submitted_at')
+                or attempt.get('submittedAt')
+                or ''
+            )
+            key = (
+                test_id.lower(),
+                timestamp or f"legacy:{attempt.get('marks_scored', '')}:{attempt.get('total_marks', '')}",
+            )
+            attempts_by_key[key] = {**attempts_by_key.get(key, {}), **attempt}
+
+        return list(attempts_by_key.values())
     except Exception as e:
         return {'error': f'Failed to fetch tests_submitted: {str(e)}'}, 500
 
