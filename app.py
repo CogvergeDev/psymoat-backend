@@ -89,6 +89,10 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)  # Set token expiry t
 
 jwt = JWTManager(app)
 
+# The catalog is additive; provisioning and import are explicit offline commands.
+from lecture_catalog import create_catalog_blueprint
+app.register_blueprint(create_catalog_blueprint(dynamodb))
+
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
 R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID')
 R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY')
