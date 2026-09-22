@@ -88,8 +88,17 @@ class Catalog:
             if not response.get("LastEvaluatedKey"):
                 break
             args["ExclusiveStartKey"] = response["LastEvaluatedKey"]
-        # Preserve the existing exam picker's exclusion of the internal test exam.
-        return sorted([{"id": x["exam_id"], "name": x["exam_name"], "active": x.get("catalog_active", x["exam_id"] != "BYP0UD")} for x in items], key=lambda x: x["name"].casefold())
+
+        def _is_active(item):
+            if item.get("is_active") is False:
+                return False
+            if item.get("catalog_active") is False:
+                return False
+            if item.get("exam_id") == "BYP0UD":
+                return False
+            return True
+
+        return sorted([{"id": x["exam_id"], "name": x["exam_name"], "active": _is_active(x)} for x in items], key=lambda x: x["name"].casefold())
 
     def require_exam(self, exam):
         item = self.db.ExamTable.get_item(Key={"exam_id": identifier(exam)}, ConsistentRead=True).get("Item")
@@ -367,7 +376,26 @@ def create_catalog_blueprint(db):
 
     @bp.get("/catalog/exams")
     def exams():
+        include_all = request.args.get("all", "").lower() in ("true", "1")
+        if include_all:
+            return jsonify(exams=catalog.exams())
         return jsonify(exams=[e for e in catalog.exams() if e["active"]])
+
+    @bp.get("/catalog/admin/exams")
+    def admin_exams():
+        return jsonify(exams=catalog.exams())
+
+    @bp.put("/catalog/admin/exams/<exam>/toggle-status")
+    def toggle_exam(exam):
+        catalog.require_exam(exam)
+        data = request.get_json(silent=True) or {}
+        if "is_active" not in data:
+            return jsonify(message="is_active is required"), 400
+        is_active = data.get("is_active")
+        if not isinstance(is_active, bool):
+            is_active = str(is_active).lower() in ("true", "1")
+        result = db.toggle_exam_status(exam, is_active)
+        return jsonify(result), result.get("statusCode", 200)
 
     @bp.get("/catalog/<exam>/folders")
     def folders(exam):

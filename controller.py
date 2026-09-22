@@ -35,6 +35,9 @@ import re
 
 
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # define IST timezone
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -783,15 +786,19 @@ def get_modules_by_exam_id(exam_id):
             'error': str(e)
         }
 
-def get_all_exam_details():
+def get_all_exam_details(include_inactive=False):
     try:
-        response = ExamTable.scan(ProjectionExpression="exam_id, exam_name, modules")
+        response = ExamTable.scan(ProjectionExpression="exam_id, exam_name, modules, is_active")
         items = response.get('Items', [])
         exams_dict = {}
         for item in items:
             exam_id = item.get('exam_id')
+            is_active = item.get('is_active')
+            if not include_inactive and is_active is False:
+                continue
             exams_dict[exam_id] = {
                 'exam_name': item.get('exam_name'),
+                'is_active': True if is_active is None else bool(is_active),
                 'modules': get_modules_by_exam_id(exam_id)
             }
         return {
@@ -804,6 +811,45 @@ def get_all_exam_details():
             'statusCode': 500,
             'msg': 'Error occurred while retrieving exams',
             'error': str(e)
+        }
+
+def get_all_exam_details_admin():
+    return get_all_exam_details(include_inactive=True)
+
+def toggle_exam_status(exam_id, is_active):
+    try:
+        response = ExamTable.update_item(
+            Key={'exam_id': exam_id},
+            UpdateExpression="SET is_active = :status",
+            ConditionExpression="attribute_exists(exam_id)",
+            ExpressionAttributeValues={':status': bool(is_active)},
+            ReturnValues="ALL_NEW"
+        )
+        return {
+            'statusCode': 200,
+            'status': 'success',
+            'msg': f"Exam {exam_id} status updated to {bool(is_active)}",
+            'exam_id': exam_id,
+            'is_active': bool(is_active),
+            'attributes': response.get('Attributes', {})
+        }
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return {
+                'statusCode': 404,
+                'status': 'error',
+                'msg': f"Exam {exam_id} not found"
+            }
+        return {
+            'statusCode': 500,
+            'status': 'error',
+            'msg': f"Failed to update exam status: {str(e)}"
+        }
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'status': 'error',
+            'msg': f"Failed to update exam status: {str(e)}"
         }
 
 
@@ -865,13 +911,14 @@ def initialize_new_exam(exam_name):
     try:
         exam_id = generate_id(6)
         response = ExamTable.put_item(
-            Item={'exam_id': exam_id, 'exam_name': exam_name, 'modules': []}
+            Item={'exam_id': exam_id, 'exam_name': exam_name, 'modules': [], 'is_active': True}
         )
         if response.get('ResponseMetadata', {}).get('HTTPStatusCode') == 200:
             return {
                 "status": "success",
                 "exam_id": exam_id,
                 "exam_name": exam_name,
+                "is_active": True,
                 "message": "Exam created successfully."
             }
         else:
@@ -904,6 +951,8 @@ def get_user(email):
             return {'error': 'User not found!'}, 404
         user = resp['Item']
         user.pop('password', None)
+        user.setdefault('exams_paid_for', [])
+        user.setdefault('units_paid_for', [])
         return user
     except Exception as e:
         return {'error': 'An unexpected error occurred', 'details': str(e)}
@@ -1068,10 +1117,11 @@ def register(email, password, fullName):
             'joinedOn': get_time(),
             'lastLogin': '',
             'examsTaken': [],
-            'is_paid' : "false",
+            'is_paid': "false",
             'plan_id': "free",
-            'plan_valid_till': ""
-
+            'plan_valid_till': "",
+            'exams_paid_for': [],
+            'units_paid_for': []
         }
         UserTable.put_item(Item=item)
         return jsonify({'msg': 'Registration successful'}), 201
@@ -1090,14 +1140,15 @@ def login(email, password):
         if not bcrypt.check_password_hash(user['password'], password):
             return jsonify({'msg': 'Invalid credentials'}), 401
 
-
+        is_paid_val = "true" if (user.get("is_paid") in (True, 'true', 'True', 1)) else "false"
         additional_claims = {
-            "is_paid": user.get("is_paid", "false"),
-            "plan_id": user.get("plan_id", "")
+            "is_paid": is_paid_val,
+            "plan_id": user.get("plan_id", ""),
+            "exams_paid_for": user.get("exams_paid_for", []),
+            "units_paid_for": user.get("units_paid_for", [])
         }
 
-        
-        access_token = create_access_token(identity=email , additional_claims=additional_claims)
+        access_token = create_access_token(identity=email, additional_claims=additional_claims)
         refresh_token = create_refresh_token(identity=email)
 
         response = jsonify({'msg': 'Login successful'})
@@ -1111,7 +1162,16 @@ def login(email, password):
 
 def refresh():
     identity = get_jwt_identity()
-    new_access = create_access_token(identity=identity)
+    user_resp = UserTable.get_item(Key={'email': identity})
+    user = user_resp.get('Item', {}) if 'Item' in user_resp else {}
+    is_paid_val = "true" if (user.get("is_paid") in (True, 'true', 'True', 1)) else "false"
+    additional_claims = {
+        "is_paid": is_paid_val,
+        "plan_id": user.get("plan_id", ""),
+        "exams_paid_for": user.get("exams_paid_for", []),
+        "units_paid_for": user.get("units_paid_for", [])
+    }
+    new_access = create_access_token(identity=identity, additional_claims=additional_claims)
     response = jsonify({'msg': 'Token refreshed'})
     set_access_cookies(response, new_access)
     return response, 200
@@ -1177,15 +1237,15 @@ def save_successful_payment(payment_data: dict) -> dict:
        - mark is_paid = True
        - set plan_id
        - set plan_valid_till using the purchased duration
-       - update exams_paid_for if plan_id matches
+       - update exams_paid_for if plan_id matches (e.g. ugc_net_full_course_v1)
+       - update units_paid_for if plan_id matches (e.g. ugc_net_units_v1)
     """
-    months = int(payment_data.get('months') or 6)
+    months = int(payment_data.get('months') or 3)
     if months <= 0:
         raise ValueError("Payment duration must be a positive number of months")
 
     # 1) record the payment
-    
-    PaymentHistoryTable.put_item(Item={
+    payment_record = {
         'payment_id':   payment_data['payment_id'],
         'order_id':     payment_data['order_id'],
         'amount':       payment_data['amount'],
@@ -1195,8 +1255,13 @@ def save_successful_payment(payment_data: dict) -> dict:
         'plan_id':      payment_data['plan_id'],
         'months':       months,
         'status':       'captured',
-    })
+    }
+    if payment_data.get('unit_ids'):
+        payment_record['unit_ids'] = payment_data['unit_ids']
+    if payment_data.get('exam_ids'):
+        payment_record['exam_ids'] = payment_data['exam_ids']
 
+    PaymentHistoryTable.put_item(Item=payment_record)
 
     # 2) Extend an active subscription instead of discarding its remaining time.
     # Expired subscriptions start again from the current time.
@@ -1221,10 +1286,14 @@ def save_successful_payment(payment_data: dict) -> dict:
     expiry_dt  = expiry_base + relativedelta(months=months)
     expiry_iso = expiry_dt.isoformat()
 
-    # 3) Prepare exams_paid_for logic
+    # 3) Prepare exams_paid_for & units_paid_for logic
     plan_id = payment_data.get('plan_id')
-    exam_ids = payment_data.get('exam_ids', [])
-    exams_paid_for = None
+    exam_ids = payment_data.get('exam_ids', []) or []
+    unit_ids = payment_data.get('unit_ids', []) or []
+
+    current_exams = list(user.get('exams_paid_for', []) or [])
+    current_units = list(user.get('units_paid_for', []) or [])
+
     update_expr = """
         SET
           is_paid            = :paid,
@@ -1237,26 +1306,49 @@ def save_successful_payment(payment_data: dict) -> dict:
         ':valid': expiry_iso
     }
 
-    # Only update exams_paid_for for specific plans
-    if plan_id in ( "cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1"):
-        current_exams = user.get('exams_paid_for', [])
+    # Case A: UGC NET Full Course
+    if plan_id == 'ugc_net_full_course_v1':
+        to_add = ["qjPZtz_lecs", "qjPZtz_mocks"]
+        if exam_ids:
+            to_add.extend(exam_ids)
+        for eid in to_add:
+            if eid and eid not in current_exams:
+                current_exams.append(eid)
+        update_expr += ", exams_paid_for = :epf"
+        expr_values[':epf'] = current_exams
+
+    # Case B: UGC NET Modular Units
+    elif plan_id == 'ugc_net_units_v1':
+        for uid in unit_ids:
+            if uid and uid not in current_units:
+                current_units.append(uid)
+        update_expr += ", units_paid_for = :upf"
+        expr_values[':upf'] = current_units
+        # Note: Do NOT grant "qjPZtz_mocks"
+
+    # Legacy plans
+    elif plan_id in ("cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1"):
         to_add = []
         if plan_id == 'cuet_pg_trainer_v1' and exam_ids:
             to_add = [exam_ids[0]]
-        elif plan_id == 'cuet_pg_advanced_v1':
-            to_add = exam_ids
-        elif plan_id == 'netjrf_trainer_v1':
-            to_add = exam_ids
-        elif plan_id == 'netjrf_advanced_v1' or plan_id == "ugc_net_advanced_monthly_v1":
+        elif plan_id in ('cuet_pg_advanced_v1', 'netjrf_trainer_v1', 'netjrf_advanced_v1', 'ugc_net_advanced_monthly_v1'):
             to_add = exam_ids
 
         # Avoid duplicates
         for eid in to_add:
             if eid and eid not in current_exams:
                 current_exams.append(eid)
-        exams_paid_for = current_exams
         update_expr += ", exams_paid_for = :epf"
-        expr_values[':epf'] = exams_paid_for
+        expr_values[':epf'] = current_exams
+
+    # If unit_ids provided on any other plan, persist them as well
+    if unit_ids and plan_id != 'ugc_net_units_v1':
+        for uid in unit_ids:
+            if uid and uid not in current_units:
+                current_units.append(uid)
+        if ":upf" not in expr_values:
+            update_expr += ", units_paid_for = :upf"
+            expr_values[':upf'] = current_units
 
     # 4) update or create the user record
     user_response = UserTable.update_item(
@@ -1269,17 +1361,22 @@ def save_successful_payment(payment_data: dict) -> dict:
     additional_claims = {
         "is_paid": "true",           
         "plan_id": plan_id,
-        "exams_paid_for": exams_paid_for
+        "exams_paid_for": current_exams,
+        "units_paid_for": current_units
     }
     access_token = create_access_token(
         identity=payment_data['user_email'],
         additional_claims=additional_claims
     )
 
+    updated_attrs = user_response.get('Attributes', {})
+    updated_attrs.setdefault('exams_paid_for', current_exams)
+    updated_attrs.setdefault('units_paid_for', current_units)
+
     response = jsonify({
         'status':       'success',
         'message':      'Payment history saved and user subscription updated',
-        'user_update':  user_response.get('Attributes', {})
+        'user_update':  updated_attrs
     })
     set_access_cookies(response, access_token)
     return response, 200
@@ -1287,13 +1384,13 @@ def save_successful_payment(payment_data: dict) -> dict:
 
 def delete_user_payment_fields(email: str) -> dict:
     """
-    Remove is_paid, plan_id, and plan_valid_till
+    Remove is_paid, plan_id, plan_valid_till, exams_paid_for, and units_paid_for
     from the UserTable item keyed by `email`.
     """
     try:
         resp = UserTable.update_item(
             Key={ 'email': email },
-            UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for",
+            UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for, units_paid_for",
             ReturnValues="UPDATED_OLD"  
             # returns the old values of any removed attributes
         )
@@ -2011,25 +2108,46 @@ def get_test_dashboard_controller(exam_id):
     except Exception as e:
         return {"msg": "An unexpected error occurred", "error": str(e)}, 500
 
-def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: list = None) -> dict:
+def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: list = None, unit_ids: list = None) -> dict:
     """
-    Updates the user in UserTable to set is_paid=True, plan_id=plan_id, plan_valid_till, and exams_paid_for for the new plan_ids.
+    Updates the user in UserTable to set is_paid=True, plan_id=plan_id, plan_valid_till, exams_paid_for, and units_paid_for.
     """
     try:
-        # print(exam_ids)
         resp = UserTable.get_item(Key={'email': email})
         if 'Item' not in resp:
             return {'status': 'error', 'message': f'User {email} not found.'}
+        user = resp['Item']
         update_expr = "SET is_paid = :paid, plan_id = :plan_id, plan_valid_till = :plan_valid_till"
         expr_values = {
             ':paid': True,
             ':plan_id': plan_id,
             ':plan_valid_till': plan_valid_till
         }
-        exams_paid_for = None
-        if plan_id in ("cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1") and exam_ids:
-            user = resp['Item']
-            current_exams = user.get('exams_paid_for', [])
+        current_exams = list(user.get('exams_paid_for', []) or [])
+        current_units = list(user.get('units_paid_for', []) or [])
+
+        # Case A: UGC NET Full Course
+        if plan_id == 'ugc_net_full_course_v1':
+            to_add = ["qjPZtz_lecs", "qjPZtz_mocks"]
+            if exam_ids:
+                to_add.extend(exam_ids)
+            for eid in to_add:
+                if eid and eid not in current_exams:
+                    current_exams.append(eid)
+            update_expr += ", exams_paid_for = :epf"
+            expr_values[':epf'] = current_exams
+
+        # Case B: UGC NET Modular Units
+        elif plan_id == 'ugc_net_units_v1':
+            if unit_ids:
+                for uid in unit_ids:
+                    if uid and uid not in current_units:
+                        current_units.append(uid)
+            update_expr += ", units_paid_for = :upf"
+            expr_values[':upf'] = current_units
+
+        # Legacy plans
+        elif plan_id in ("cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1") and exam_ids:
             to_add = []
             if plan_id == 'cuet_pg_trainer_v1':
                 to_add = [exam_ids[0]]
@@ -2038,15 +2156,29 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
             for eid in to_add:
                 if eid and eid not in current_exams:
                     current_exams.append(eid)
-            exams_paid_for = current_exams
             update_expr += ", exams_paid_for = :epf"
-            expr_values[':epf'] = exams_paid_for
+            expr_values[':epf'] = current_exams
+
+        # If unit_ids provided on any other plan, persist them as well
+        if unit_ids and plan_id != 'ugc_net_units_v1':
+            for uid in unit_ids:
+                if uid and uid not in current_units:
+                    current_units.append(uid)
+            if ':upf' not in expr_values:
+                update_expr += ", units_paid_for = :upf"
+                expr_values[':upf'] = current_units
+
         UserTable.update_item(
             Key={'email': email},
             UpdateExpression=update_expr,
             ExpressionAttributeValues=expr_values
         )
-        return {'status': 'success', 'message': f'Paid access granted to {email} with plan_id {plan_id}.', 'exams_paid_for': exams_paid_for}
+        return {
+            'status': 'success',
+            'message': f'Paid access granted to {email} with plan_id {plan_id}.',
+            'exams_paid_for': current_exams,
+            'units_paid_for': current_units
+        }
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
 
@@ -2057,7 +2189,7 @@ def get_users_by_plan(plan_id: str) -> list:
     try:
         response = UserTable.scan(
             FilterExpression=Attr('plan_id').eq(plan_id),
-            ProjectionExpression="email, is_paid, plan_id, fullName, plan_valid_till"
+            ProjectionExpression="email, is_paid, plan_id, fullName, plan_valid_till, exams_paid_for, units_paid_for"
         )
         return response.get('Items', [])
     except Exception as e:
@@ -2104,7 +2236,7 @@ def cleanup_expired_user_plans() -> dict:
             if expiry_ist < now:
                 update_resp = UserTable.update_item(
                     Key={'email': user['email']},
-                    UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for",
+                    UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for, units_paid_for",
                     ReturnConsumedCapacity='TOTAL'
                 )
                 total_rcu += update_resp.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
@@ -2127,13 +2259,13 @@ def get_active_paid_users() -> dict:
         now_iso = datetime.now(IST).isoformat()
         response = UserTable.scan(
             FilterExpression=Attr('plan_valid_till').gt(now_iso),
-            ProjectionExpression="email, fullName, plan_id, plan_valid_till, exams_paid_for"
+            ProjectionExpression="email, fullName, plan_id, plan_valid_till, exams_paid_for, units_paid_for"
         )
         users = response.get('Items', [])
         while 'LastEvaluatedKey' in response:
             response = UserTable.scan(
                 FilterExpression=Attr('plan_valid_till').gt(now_iso),
-                ProjectionExpression="email, fullName, plan_id, plan_valid_till, exams_paid_for",
+                ProjectionExpression="email, fullName, plan_id, plan_valid_till, exams_paid_for, units_paid_for",
                 ExclusiveStartKey=response['LastEvaluatedKey']
             )
             users.extend(response.get('Items', []))

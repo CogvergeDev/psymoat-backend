@@ -263,7 +263,11 @@ def get_all_module_details():
 @jwt_required()
 def get_all_exam_details():
     try:
-        response = dynamodb.get_all_exam_details()
+        include_inactive = request.args.get('all', 'false').lower() in ('true', '1')
+        if include_inactive:
+            response = dynamodb.get_all_exam_details_admin()
+        else:
+            response = dynamodb.get_all_exam_details()
         return jsonify(response), response.get('statusCode', 200)
     except Exception as e:
         return jsonify({'msg': 'Some error occurred', 'error': str(e)}), 500
@@ -564,8 +568,9 @@ def complete_razorpay_order():
     created_at = datetime.now(IST).isoformat()
     user_email = get_jwt_identity()
     exams_ids = data.get('exam_ids')
+    unit_ids = data.get('unit_ids')
     try:
-        months = int(data.get('months') or 6)
+        months = int(data.get('months') or 3)
         if months <= 0:
             raise ValueError
     except (TypeError, ValueError):
@@ -624,8 +629,7 @@ def complete_razorpay_order():
 
     # ——— at this point status == 'captured' ———
     try:
-        # Pass exam_ids to save_successful_payment
-
+        # Pass exam_ids and unit_ids to save_successful_payment
         response, status_code = dynamodb.save_successful_payment({
             'payment_id': payment_id,
             'order_id':   order_id,
@@ -635,7 +639,8 @@ def complete_razorpay_order():
             'user_email': user_email,
             'plan_id':    plan_id,
             'exam_ids':   exams_ids,
-            'months': months
+            'unit_ids':   unit_ids,
+            'months':     months
         })
         print(response)
         return response, status_code
@@ -1069,16 +1074,16 @@ def get_test_dashboard(exam_id):
 @app.route('/grant-paid-access', methods=['POST'])
 def grant_paid_access_route():
     data = request.get_json(force=True)
-    months = data.get('months')
+    months = int(data.get('months') or 3)
     email = data.get('email')
     plan_id = data.get('plan_id')
     exam_ids = data.get('exam_ids', [])
-    # print(exam_ids)
+    unit_ids = data.get('unit_ids', [])
     if not email or not plan_id:
         return jsonify({'status': 'error', 'message': 'email and plan_id are required'}), 400
-    # Calculate plan_valid_till as 6 months from now in UTC ISO format
-    plan_valid_till = (datetime.now(IST) + relativedelta(months=months)).replace(microsecond=0).isoformat() + 'Z'
-    result = dynamodb.grant_paid_access(email, plan_id, plan_valid_till, exam_ids)
+    # Calculate plan_valid_till as months from now in ISO format
+    plan_valid_till = (datetime.now(IST) + relativedelta(months=months)).replace(microsecond=0).isoformat()
+    result = dynamodb.grant_paid_access(email, plan_id, plan_valid_till, exam_ids, unit_ids)
     status = 200 if result.get('status') == 'success' else 404
     return jsonify(result), status
 
@@ -1341,6 +1346,41 @@ def admin_payment_history_route():
             'message': str(e)
         }), 500
 
+
+@app.route('/admin/exams/<string:exam_id>/toggle-status', methods=['PUT'])
+def admin_toggle_exam_status_route(exam_id):
+    data = request.get_json(silent=True) or {}
+    if 'is_active' not in data:
+        return jsonify({'status': 'error', 'message': 'is_active (boolean) is required'}), 400
+    is_active = data.get('is_active')
+    if not isinstance(is_active, bool):
+        if str(is_active).lower() in ('true', '1'):
+            is_active = True
+        elif str(is_active).lower() in ('false', '0'):
+            is_active = False
+        else:
+            return jsonify({'status': 'error', 'message': 'is_active must be a boolean'}), 400
+
+    result = dynamodb.toggle_exam_status(exam_id, is_active)
+    return jsonify(result), result.get('statusCode', 200)
+
+
+@app.route('/admin/get-all-exam-details', methods=['GET'])
+def admin_get_all_exam_details_route():
+    try:
+        response = dynamodb.get_all_exam_details_admin()
+        return jsonify(response), response.get('statusCode', 200)
+    except Exception as e:
+        return jsonify({'msg': 'Some error occurred', 'error': str(e)}), 500
+
+
+@app.route('/admin/exams', methods=['GET'])
+def admin_exams_route():
+    try:
+        response = dynamodb.get_all_exam_details_admin()
+        return jsonify(response), response.get('statusCode', 200)
+    except Exception as e:
+        return jsonify({'msg': 'Some error occurred', 'error': str(e)}), 500
 
 
 #sample cloudinary upload
