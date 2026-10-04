@@ -93,6 +93,9 @@ jwt = JWTManager(app)
 from lecture_catalog import create_catalog_blueprint
 app.register_blueprint(create_catalog_blueprint(dynamodb))
 
+from admin_audit import install_admin_audit, current_audit, finish_event
+install_admin_audit(app, dynamodb)
+
 R2_ACCOUNT_ID = os.getenv('R2_ACCOUNT_ID')
 R2_ACCESS_KEY_ID = os.getenv('R2_ACCESS_KEY_ID')
 R2_SECRET_ACCESS_KEY = os.getenv('R2_SECRET_ACCESS_KEY')
@@ -2098,17 +2101,20 @@ def _fix_offsets_in_moov(moov_data: bytes, delta: int) -> bytes:
     return bytes(buf)
 
 
-def _do_process_video(video_key):
+def _do_process_video(video_key, audit_context=None):
+    audit_outcome = 'failed'
     try:
         atoms, file_size = _read_top_level_atoms(video_key)
         types = [a['type'] for a in atoms]
 
         if 'moov' not in types:
+            audit_outcome = 'skipped_no_moov'
             print(f"process-video: no moov in {video_key}")
             return
 
         moov_idx = types.index('moov')
         if moov_idx == 0 or (moov_idx == 1 and types[0] == 'ftyp'):
+            audit_outcome = 'already_optimized'
             print(f"process-video: {video_key} already optimized")
             return
 
@@ -2172,6 +2178,7 @@ def _do_process_video(video_key):
                 MultipartUpload={'Parts': parts}
             )
             print(f"process-video: done {video_key}")
+            audit_outcome = 'succeeded'
 
         except Exception as e:
             s3.abort_multipart_upload(Bucket=R2_BUCKET_NAME, Key=video_key, UploadId=upload_id)
@@ -2179,6 +2186,9 @@ def _do_process_video(video_key):
 
     except Exception as e:
         print(f"process-video error {video_key}: {e}")
+    finally:
+        if audit_context is not None:
+            finish_event(audit_context, 'background_completed', {'outcome': audit_outcome, 'video_key': video_key})
 
 
 @app.route('/process-video', methods=['POST'])
@@ -2188,7 +2198,7 @@ def process_video():
     if not video_key:
         return jsonify({'error': 'video_key is required'}), 400
 
-    threading.Thread(target=_do_process_video, args=(video_key,), daemon=True).start()
+    threading.Thread(target=_do_process_video, args=(video_key, current_audit()), daemon=True).start()
     return jsonify({'status': 'processing'}), 202
 
 

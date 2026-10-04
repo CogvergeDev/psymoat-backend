@@ -243,8 +243,48 @@ class PaymentEntitlementTests(unittest.TestCase):
         self.assertIn(email, res['cleaned_users'])
 
         user = self.user_table.get_item(Key={'email': email})['Item']
-        self.assertNotIn('is_paid', user)
-        self.assertNotIn('units_paid_for', user)
+        self.assertIs(user['is_paid'], False)
+        self.assertEqual(user['plan_id'], 'free')
+        self.assertEqual(user['plan_valid_till'], '')
+        self.assertEqual(user['last_subscription_plan_id'], 'ugc_net_units_v1')
+        self.assertEqual(user['last_subscription_valid_till'], past_iso)
+        self.assertEqual(user['exams_paid_for'], [])
+        self.assertEqual(user['units_paid_for'], [])
+        self.assertEqual(controller.cleanup_expired_user_plans()['count'], 0)
+
+    def test_expired_free_account_can_purchase_again(self):
+        email = 'renew_expired@example.com'
+        past_iso = (datetime.now(IST) - timedelta(days=10)).isoformat()
+        self._create_user(
+            email, is_paid=True, plan_id='ugc_net_full_course_v1',
+            plan_valid_till=past_iso, exams_paid_for=['qjPZtz_lecs', 'qjPZtz_mocks'],
+        )
+        controller.cleanup_expired_user_plans()
+        response, status = controller.save_successful_payment({
+            'payment_id': 'pay_renew', 'order_id': 'order_renew', 'amount': 500,
+            'signature': 'signature', 'created_at': datetime.now(IST).isoformat(),
+            'user_email': email, 'plan_id': 'ugc_net_units_v1', 'months': 3,
+            'unit_ids': ['paper-1-teaching-aptitude'],
+        })
+        self.assertEqual(status, 200)
+        user = self.user_table.get_item(Key={'email': email})['Item']
+        self.assertTrue(user['is_paid'])
+        self.assertEqual(user['plan_id'], 'ugc_net_units_v1')
+        self.assertGreater(parser.parse(user['plan_valid_till']), datetime.now(IST) + timedelta(days=80))
+        self.assertEqual(user['exams_paid_for'], [])
+        self.assertEqual(user['units_paid_for'], ['paper-1-teaching-aptitude'])
+        self.assertEqual(user['last_subscription_valid_till'], past_iso)
+
+    def test_cleanup_keeps_active_subscription_unchanged(self):
+        email = 'active@example.com'
+        future = (datetime.now(IST) + timedelta(days=10)).isoformat()
+        self._create_user(
+            email, is_paid=True, plan_id='ugc_net_full_course_v1',
+            plan_valid_till=future, exams_paid_for=['qjPZtz_lecs', 'qjPZtz_mocks'],
+        )
+        before = self.user_table.get_item(Key={'email': email})['Item']
+        self.assertEqual(controller.cleanup_expired_user_plans()['count'], 0)
+        self.assertEqual(self.user_table.get_item(Key={'email': email})['Item'], before)
 
     def test_get_user_defaults(self):
         email = "bare_user@example.com"

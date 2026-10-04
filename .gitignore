@@ -9,3 +9,8 @@ config.py
 backend-psymoat-ec2.pem
 app.txt
 controller.txt
+
+# Local investigation notes and one-off production repair tooling
+/ADMIN_AUDIT.md
+/SUBSCRIPTION_REPAIR.md
+/repair_subscription_fields.py

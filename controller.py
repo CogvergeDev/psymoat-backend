@@ -20,6 +20,7 @@ from flask_jwt_extended import (
 )
 from datetime import datetime, timedelta
 import logging
+from admin_audit import audit_state, audit_child_start, audit_child_finish
 from dateutil.relativedelta import relativedelta
 from dateutil import parser
 from zoneinfo import ZoneInfo
@@ -29,6 +30,10 @@ from io import StringIO
 import math
 from decimal import Decimal
 import re
+from subscription_reconciliation import (
+    conditional_state_update, free_subscription_fields, parse_expiry,
+    reconciliation_preview,
+)
 
 
 
@@ -2117,6 +2122,7 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
         if 'Item' not in resp:
             return {'status': 'error', 'message': f'User {email} not found.'}
         user = resp['Item']
+        audit_state(before=user)
         update_expr = "SET is_paid = :paid, plan_id = :plan_id, plan_valid_till = :plan_valid_till"
         expr_values = {
             ':paid': True,
@@ -2168,11 +2174,13 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
                 update_expr += ", units_paid_for = :upf"
                 expr_values[':upf'] = current_units
 
-        UserTable.update_item(
+        updated = UserTable.update_item(
             Key={'email': email},
             UpdateExpression=update_expr,
-            ExpressionAttributeValues=expr_values
+            ExpressionAttributeValues=expr_values,
+            ReturnValues='ALL_NEW'
         )
+        audit_state(after=updated.get('Attributes', {}))
         return {
             'status': 'success',
             'message': f'Paid access granted to {email} with plan_id {plan_id}.',
@@ -2198,8 +2206,8 @@ def get_users_by_plan(plan_id: str) -> list:
 
 def cleanup_expired_user_plans() -> dict:
     """
-    Scans all users and removes active subscription fields and entitlements
-    if plan_valid_till < now (IST).
+    Convert expired subscriptions to Free, retaining their historical expiry.
+    Conditional updates protect purchases or grants made during the scan.
     Returns a summary dict including total RCU consumed.
     """
     try:
@@ -2212,6 +2220,7 @@ def cleanup_expired_user_plans() -> dict:
         users = response.get('Items', [])
         total_rcu += response.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
         cleaned = []
+        skipped_concurrent = []
         # Handle pagination
         while 'LastEvaluatedKey' in response:
             response = UserTable.scan(
@@ -2226,25 +2235,30 @@ def cleanup_expired_user_plans() -> dict:
             if not plan_valid_till:
                 continue
             try:
-                # Remove trailing Z if present for robust parsing
-                plan_valid_till_clean = plan_valid_till.rstrip('Z')
-                expiry = parser.parse(plan_valid_till_clean)
-                # Convert to IST for comparison
-                expiry_ist = expiry.astimezone(IST)
-            except Exception:
+                expiry_ist = parse_expiry(plan_valid_till)
+            except (TypeError, ValueError, OverflowError):
                 continue
-            if expiry_ist < now:
-                update_resp = UserTable.update_item(
-                    Key={'email': user['email']},
-                    UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for, units_paid_for",
-                    ReturnConsumedCapacity='TOTAL'
-                )
+            if expiry_ist <= now:
+                fields = free_subscription_fields(user, plan_valid_till)
+                if all(user.get(field) == value for field, value in fields.items()):
+                    continue
+                try:
+                    audit_child = audit_child_start(user['email'], user, fields)
+                    update_resp = conditional_state_update(UserTable, user, fields)
+                except ClientError as error:
+                    audit_child_finish(audit_child, 'failed', error=error)
+                    if error.response['Error']['Code'] != 'ConditionalCheckFailedException':
+                        raise
+                    skipped_concurrent.append(user['email'])
+                    continue
                 total_rcu += update_resp.get('ConsumedCapacity', {}).get('CapacityUnits', 0)
                 cleaned.append(user['email'])
+                audit_child_finish(audit_child, 'succeeded', after=fields)
         return {
             "status": "success",
             "cleaned_users": cleaned,
             "count": len(cleaned),
+            "skipped_concurrent": skipped_concurrent,
             "rcu_consumed": total_rcu
         }
     except Exception as e:
@@ -2311,41 +2325,31 @@ def get_users_with_exam_paid_for_but_no_payment_fields() -> dict:
 
 def clear_payment_fields_for_users_with_exam_paid_for_no_payment_fields() -> dict:
     """
-    Finds users where exams_paid_for exists and is_paid/plan_valid_till are missing,
-    then removes payment fields for all matched users.
+    Reconcile missing subscription fields instead of deleting more account data.
+    Accounts with future expiry or undocumented paid grants require review.
     """
     try:
-        response = UserTable.scan(
-            FilterExpression=(
-                Attr('exams_paid_for').exists() &
-                Attr('is_paid').not_exists() &
-                Attr('plan_valid_till').not_exists()
-            ),
-            ProjectionExpression="email"
+        _, users, decisions = reconciliation_preview(
+            UserTable, PaymentHistoryTable, datetime.now(IST)
         )
-        users = response.get('Items', [])
-
-        while 'LastEvaluatedKey' in response:
-            response = UserTable.scan(
-                FilterExpression=(
-                    Attr('exams_paid_for').exists() &
-                    Attr('is_paid').not_exists() &
-                    Attr('plan_valid_till').not_exists()
-                ),
-                ProjectionExpression="email",
-                ExclusiveStartKey=response['LastEvaluatedKey']
-            )
-            users.extend(response.get('Items', []))
-
-        emails = [u.get('email') for u in users if u.get('email')]
+        by_email = {user['email']: user for user in users}
         cleared_email_ids = []
         failed = []
+        skipped = []
 
-        for email in emails:
+        for decision in decisions:
+            email = decision['email']
+            if not decision['changes']:
+                skipped.append({'email': email, 'reason': decision['reason']})
+                continue
+            audit_child = None
             try:
-                delete_user_payment_fields(email)
+                audit_child = audit_child_start(email, by_email[email], decision['changes'])
+                conditional_state_update(UserTable, by_email[email], decision['changes'])
                 cleared_email_ids.append(email)
+                audit_child_finish(audit_child, 'succeeded', after=decision['changes'])
             except Exception as exc:
+                audit_child_finish(audit_child, 'failed', error=exc)
                 failed.append({'email': email, 'error': str(exc)})
 
         return {
@@ -2353,7 +2357,8 @@ def clear_payment_fields_for_users_with_exam_paid_for_no_payment_fields() -> dic
             "cleared_email_ids": cleared_email_ids,
             "cleared_count": len(cleared_email_ids),
             "failed": failed,
-            "failed_count": len(failed)
+            "failed_count": len(failed),
+            "skipped": skipped
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -2403,16 +2408,23 @@ def remove_graphs_all_users() -> dict:
         )
         users = response.get('Items', [])
         cleaned = []
+        failed_count = 0
         for user in users:
             email = user['email']
+            audit_child = None
             try:
+                audit_child = audit_child_start(email, {}, {'removed_fields': ['data_graph_modulewise', 'data_graph_leetcode_accuracy', 'solved_wrong']})
                 UserTable.update_item(
                     Key={'email': email},
                     UpdateExpression="REMOVE data_graph_modulewise, data_graph_leetcode_accuracy, solved_wrong"
                 )
                 cleaned.append(email)
-            except Exception:
+                audit_child_finish(audit_child, 'succeeded')
+            except Exception as error:
+                failed_count += 1
+                audit_child_finish(audit_child, 'failed', error=error)
                 continue
+        audit_state(result={'failed_count': failed_count})
         return {"status": "success", "cleaned_users": cleaned, "count": len(cleaned)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
