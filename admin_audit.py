@@ -26,8 +26,13 @@ KEY_SCHEMA = [{"AttributeName": "pk", "KeyType": "HASH"},
 logger = logging.getLogger(__name__)
 
 # Exact method/rule pairs prevent student submissions/payments being classified
-# as administrative changes. Catalog/admin and /admin routes are covered below.
+# as administrative changes. Payment processing is explicitly audited too.
 ROUTES = {
+    ("POST", "/razorpay/order/create"): "payment.order_create",
+    ("POST", "/razorpay/order/complete"): "payment.complete",
+    ("POST", "/razorpay/order/reconcile"): "payment.reconcile",
+    ("POST", "/razorpay/orders/reconcile"): "payment.login_reconcile",
+    ("POST", "/razorpay/webhook"): "payment.webhook",
     ("POST", "/grant-paid-access"): "access.grant",
     ("POST", "/change-password"): "password.reset",
     ("POST", "/export-users-by-plan"): "users.export",
@@ -69,6 +74,7 @@ READ_POSTS = {"users.export", "admin.admin_get_user_route", "admin.admin_payment
 # Allowlisting is deliberately recursive. Unknown fields and nested secrets are
 # dropped, even if a client adds them to an otherwise legitimate payload.
 SAFE_FIELDS = set("""
+payment_id order_id amount amount_paise currency recovery_source entitlement_applied applied_at applied
 email user_id plan_id months exam_ids unit_ids is_paid plan_valid_till
 exams_paid_for units_paid_for last_subscription_plan_id last_subscription_valid_till
 subscription_expiry_source lecture_id note_id exam_id module_id blog_id test_id
@@ -337,7 +343,7 @@ def install_admin_audit(app, db, store=None):
         body = request.get_json(silent=True)
         body = body if isinstance(body, dict) else {}
         target = {key: target_value(key, value) for key, value in (request.view_args or {}).items()}
-        for key in ("email", "lecture_id", "note_id", "exam_id", "module_id", "blog_id", "test_id", "video_key", "plan_id"):
+        for key in ("email", "lecture_id", "note_id", "exam_id", "module_id", "blog_id", "test_id", "video_key", "plan_id", "payment_id", "order_id"):
             if isinstance(body.get(key), str):
                 target[key] = target_value(key, body[key])
             elif key in request.args:

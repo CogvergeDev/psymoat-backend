@@ -326,7 +326,7 @@ class AdminAuditTests(unittest.TestCase):
         for rule, method in expected:
             self.assertIn((rule, method), rules)
             self.assertIsNotNone(action_for(rule, method, rules[(rule, method)]))
-        for rule, method in [('/login', 'POST'), ('/submit-questions', 'POST'), ('/razorpay/order/complete', 'POST')]:
+        for rule, method in [('/login', 'POST'), ('/submit-questions', 'POST')]:
             self.assertIsNone(action_for(rule, method))
         self.assertIsNone(action_for('/grant-paid-access', 'OPTIONS'))
 

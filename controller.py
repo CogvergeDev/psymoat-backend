@@ -1222,167 +1222,33 @@ def save_failed_payment_history(failure_data: dict) -> None:
     """
     Record a failed (or non-captured) payment into PaymentHistoryTable only.
     """
-    PaymentHistoryTable.put_item(Item={
-        'payment_id':    failure_data['payment_id'],
-        'order_id':      failure_data['order_id'],
-        'amount':        failure_data['amount'],
-        'status':        failure_data['status'],
-        'error_code':    failure_data.get('error_code'),
-        'error_desc':    failure_data.get('error_desc'),
-        'user_email':    failure_data['user_email'],
-        'plan_id':       failure_data.get('plan_id'),
-        'created_at':    failure_data['created_at']
-    })
+    try:
+        PaymentHistoryTable.put_item(Item={
+            key: failure_data.get(key) for key in (
+                'payment_id', 'order_id', 'amount', 'status', 'error_code',
+                'error_desc', 'user_email', 'plan_id', 'created_at')
+        }, ConditionExpression='attribute_not_exists(payment_id) OR (#status <> :captured AND attribute_not_exists(entitlement_applied) AND user_email = :email AND order_id = :order)',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':captured': 'captured', ':email': failure_data['user_email'], ':order': failure_data['order_id']})
+    except ClientError as error:
+        if error.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            raise
+
 
 
 def save_successful_payment(payment_data: dict) -> dict:
-    """
-    1) Save payment to PaymentHistoryTable
-    2) Update the user in UserTable:
-       - mark is_paid = True
-       - set plan_id
-       - set plan_valid_till using the purchased duration
-       - update exams_paid_for if plan_id matches (e.g. ugc_net_full_course_v1)
-       - update units_paid_for if plan_id matches (e.g. ugc_net_units_v1)
-    """
-    months = int(payment_data.get('months') or 3)
-    if months <= 0:
-        raise ValueError("Payment duration must be a positive number of months")
-
-    # 1) record the payment
-    payment_record = {
-        'payment_id':   payment_data['payment_id'],
-        'order_id':     payment_data['order_id'],
-        'amount':       payment_data['amount'],
-        'created_at':   payment_data['created_at'],
-        'signature':    payment_data['signature'],
-        'user_email':   payment_data['user_email'],
-        'plan_id':      payment_data['plan_id'],
-        'months':       months,
-        'status':       'captured',
-    }
-    if payment_data.get('unit_ids'):
-        payment_record['unit_ids'] = payment_data['unit_ids']
-    if payment_data.get('exam_ids'):
-        payment_record['exam_ids'] = payment_data['exam_ids']
-
-    PaymentHistoryTable.put_item(Item=payment_record)
-
-    # 2) Extend an active subscription instead of discarding its remaining time.
-    # Expired subscriptions start again from the current time.
-    now = datetime.now(IST)
-    user_resp = UserTable.get_item(Key={'email': payment_data['user_email']})
-    user = user_resp.get('Item', {})
-    expiry_base = now
-    current_expiry_value = user.get('plan_valid_till')
-    current_is_paid = user.get('is_paid') in (True, 'true', 'True', 1)
-    if current_is_paid and current_expiry_value:
-        try:
-            current_expiry = parser.parse(str(current_expiry_value).rstrip('Z'))
-            if current_expiry.tzinfo is None:
-                current_expiry = current_expiry.replace(tzinfo=IST)
-            else:
-                current_expiry = current_expiry.astimezone(IST)
-            if current_expiry > now:
-                expiry_base = current_expiry
-        except (TypeError, ValueError, OverflowError):
-            pass
-
-    expiry_dt  = expiry_base + relativedelta(months=months)
-    expiry_iso = expiry_dt.isoformat()
-
-    # 3) Prepare exams_paid_for & units_paid_for logic
-    plan_id = payment_data.get('plan_id')
-    exam_ids = payment_data.get('exam_ids', []) or []
-    unit_ids = payment_data.get('unit_ids', []) or []
-
-    current_exams = list(user.get('exams_paid_for', []) or [])
-    current_units = list(user.get('units_paid_for', []) or [])
-
-    update_expr = """
-        SET
-          is_paid            = :paid,
-          plan_id            = :plan,
-          plan_valid_till    = :valid
-    """
-    expr_values = {
-        ':paid':  True,
-        ':plan':  plan_id,
-        ':valid': expiry_iso
-    }
-
-    # Case A: UGC NET Full Course
-    if plan_id == 'ugc_net_full_course_v1':
-        to_add = ["qjPZtz_lecs", "qjPZtz_mocks"]
-        if exam_ids:
-            to_add.extend(exam_ids)
-        for eid in to_add:
-            if eid and eid not in current_exams:
-                current_exams.append(eid)
-        update_expr += ", exams_paid_for = :epf"
-        expr_values[':epf'] = current_exams
-
-    # Case B: UGC NET Modular Units
-    elif plan_id == 'ugc_net_units_v1':
-        for uid in unit_ids:
-            if uid and uid not in current_units:
-                current_units.append(uid)
-        update_expr += ", units_paid_for = :upf"
-        expr_values[':upf'] = current_units
-        # Note: Do NOT grant "qjPZtz_mocks"
-
-    # Legacy plans
-    elif plan_id in ("cuet_pg_trainer_v1", "cuet_pg_advanced_v1", "netjrf_trainer_v1", "netjrf_advanced_v1", "ugc_net_advanced_monthly_v1"):
-        to_add = []
-        if plan_id == 'cuet_pg_trainer_v1' and exam_ids:
-            to_add = [exam_ids[0]]
-        elif plan_id in ('cuet_pg_advanced_v1', 'netjrf_trainer_v1', 'netjrf_advanced_v1', 'ugc_net_advanced_monthly_v1'):
-            to_add = exam_ids
-
-        # Avoid duplicates
-        for eid in to_add:
-            if eid and eid not in current_exams:
-                current_exams.append(eid)
-        update_expr += ", exams_paid_for = :epf"
-        expr_values[':epf'] = current_exams
-
-    # If unit_ids provided on any other plan, persist them as well
-    if unit_ids and plan_id != 'ugc_net_units_v1':
-        for uid in unit_ids:
-            if uid and uid not in current_units:
-                current_units.append(uid)
-        if ":upf" not in expr_values:
-            update_expr += ", units_paid_for = :upf"
-            expr_values[':upf'] = current_units
-
-    # 4) update or create the user record
-    user_response = UserTable.update_item(
-        Key={'email': payment_data['user_email']},
-        UpdateExpression=update_expr,
-        ExpressionAttributeValues=expr_values,
-        ReturnValues="UPDATED_NEW"
-    )
-
-    additional_claims = {
-        "is_paid": "true",           
-        "plan_id": plan_id,
-        "exams_paid_for": current_exams,
-        "units_paid_for": current_units
-    }
+    """Compatibility wrapper for an already verified, atomic payment grant."""
+    from payment_settlement import settle_payment
+    updated_attrs, applied = settle_payment(UserTable, PaymentHistoryTable, payment_data)
     access_token = create_access_token(
-        identity=payment_data['user_email'],
-        additional_claims=additional_claims
-    )
-
-    updated_attrs = user_response.get('Attributes', {})
-    updated_attrs.setdefault('exams_paid_for', current_exams)
-    updated_attrs.setdefault('units_paid_for', current_units)
-
-    response = jsonify({
-        'status':       'success',
-        'message':      'Payment history saved and user subscription updated',
-        'user_update':  updated_attrs
-    })
+        identity=payment_data['user_email'], additional_claims={
+            "is_paid": "true" if updated_attrs['is_paid'] else "false",
+            "plan_id": updated_attrs['plan_id'],
+            "exams_paid_for": updated_attrs['exams_paid_for'],
+            "units_paid_for": updated_attrs['units_paid_for'],
+        })
+    response = jsonify({'status': 'success', 'applied': applied,
+                        'user_update': updated_attrs})
     set_access_cookies(response, access_token)
     return response, 200
 
