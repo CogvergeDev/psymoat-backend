@@ -124,6 +124,21 @@ class PaymentRecoveryTests(unittest.TestCase):
         self.gateway.order.fetch.return_value={'amount':1,'currency':'INR'}; self.assertEqual(self.complete().status_code,409); self.assertFalse(self.user()['is_paid'])
     def test_repaired_payment_does_not_grant_again(self):
         settle_payment(self.users,self.payments,self.data(recovery_source='owner_verified_gateway_recovery')); expiry=self.user()['plan_valid_till']; self.assertFalse(self.complete().json['applied']); self.assertEqual(self.user()['plan_valid_till'],expiry)
+    def test_payment_replays_do_not_restore_a_manually_revoked_subscription(self):
+        import controller
+        self.create()
+        self.assertEqual(self.complete().status_code, 200)
+        with patch.object(controller, 'UserTable', self.users):
+            result = controller.delete_user_payment_fields(self.email)
+        self.assertEqual(result['status'], 'success')
+        self.assertFalse(self.webhook().json['applied'])
+        self.assertFalse(self.complete().json['applied'])
+        self.assertIs(self.user()['is_paid'], False)
+        self.assertEqual(self.user()['plan_id'], 'free')
+        self.assertEqual(self.user()['exams_paid_for'], [])
+        self.assertEqual(self.user()['units_paid_for'], [])
+        self.assertEqual(self.payments.scan()['Count'], 1)
+
     def test_payment_cannot_be_reassigned(self):
         settle_payment(self.users,self.payments,self.data())
         with self.assertRaises(SettlementConflict): settle_payment(self.users,self.payments,self.data(user_email='other@test.com'))

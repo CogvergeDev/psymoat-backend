@@ -495,17 +495,17 @@ def logout():
 
 @app.route('/delete-payment-fields', methods=['DELETE'])
 def delete_payment_fields():
-    # 1) grab email from the validated JWT
-    data = request.get_json(force=True)
-    email = data.get('email')
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(status='error', message='A JSON object with an email is required'), 400
 
     try:
-        # 2) delete those attributes
-        result = dynamodb.delete_user_payment_fields(email)
-        return jsonify(result), 200
-
+        result = dynamodb.delete_user_payment_fields(data.get('email'))
+        status = {'user_not_found': 404, 'subscription_changed': 409}.get(result.get('error_code'), 200)
+        return jsonify(result), status
+    except ValueError as err:
+        return jsonify(status='error', message=str(err)), 400
     except RuntimeError as err:
-        # could also catch / log more specifics
         return jsonify({
             'status': 'error',
             'message': str(err)

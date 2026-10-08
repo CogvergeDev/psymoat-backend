@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import boto3
 from flask import Flask
-from flask_jwt_extended import JWTManager, create_access_token
+from flask_jwt_extended import JWTManager, create_access_token, decode_token
 from moto import mock_aws
 
 from admin_audit import (AuditContext, AuditStore, AuditUnavailable, KEY_SCHEMA,
@@ -106,6 +106,104 @@ class AdminAuditTests(unittest.TestCase):
         raw = json.dumps(self.events(), default=str)
         for secret in ('private-hash', 'private-phone', 'injected-secret'):
             self.assertNotIn(secret, raw)
+
+    def test_downgrade_endpoint_records_complete_free_state_without_secrets(self):
+        self.actual_handlers()
+        email = 'student@example.test'
+        self.db.UserTable.put_item(Item={'email': email, 'password': 'private-hash',
+            'is_paid': True, 'plan_id': 'ugc_net_full_course_v1', 'plan_valid_till': '2027-01-06',
+            'exams_paid_for': ['qjPZtz_lecs', 'qjPZtz_mocks'], 'units_paid_for': ['unit1']})
+        response = self.client.delete('/delete-payment-fields', json={'email': email})
+        self.assertEqual(response.status_code, 200)
+        update = response.json['user_update']
+        self.assertIs(update['is_paid'], False)
+        self.assertEqual(update['plan_id'], 'free')
+        self.assertEqual(update['exams_paid_for'], [])
+        self.assertEqual(update['units_paid_for'], [])
+        self.assertEqual(update['plan_valid_till'], '')
+        done = self.events('completed')[0]
+        self.assertEqual(done['action'], 'access.remove')
+        self.assertEqual(done['details']['before']['plan_id'], 'ugc_net_full_course_v1')
+        self.assertEqual(done['details']['after']['plan_id'], 'free')
+        self.assertEqual(done['details']['after']['last_subscription_valid_till'], '2027-01-06')
+        self.assertNotIn('private-hash', json.dumps(self.events(), default=str))
+
+    def test_downgrade_validation_and_missing_account_never_create_user(self):
+        self.actual_handlers()
+        for body in ({}, [], {'email': None}, {'email': 123}, {'email': []},
+                     {'email': ''}, {'email': 'bad'}, {'email': 'a b@example.test'}):
+            with self.subTest(body=body):
+                self.assertEqual(self.client.delete('/delete-payment-fields', json=body).status_code, 400)
+        self.assertEqual(self.client.delete('/delete-payment-fields', data='{bad', content_type='application/json').status_code, 400)
+        self.assertEqual(self.client.delete('/delete-payment-fields', json={'email': 'missing@example.test'}).status_code, 404)
+        self.assertEqual(self.db.UserTable.scan()['Count'], 0)
+
+    def test_downgrade_refuses_to_overwrite_a_concurrent_purchase(self):
+        self.actual_handlers()
+        import controller
+        email = 'student@example.test'
+        self.db.UserTable.put_item(Item={'email': email, 'user_id': 'student1',
+            'is_paid': True, 'plan_id': 'ugc_net_units_v1', 'plan_valid_till': '2027-01-06'})
+        original = controller.conditional_state_update
+        def purchase_during_downgrade(table, user, changes):
+            table.update_item(Key={'email': email}, UpdateExpression='SET plan_valid_till = :new',
+                              ExpressionAttributeValues={':new': '2027-04-06'})
+            return original(table, user, changes)
+        self.patch('controller.conditional_state_update', side_effect=purchase_during_downgrade)
+        response = self.client.delete('/delete-payment-fields', json={'email': email})
+        self.assertEqual(response.status_code, 409)
+        user = self.db.UserTable.get_item(Key={'email': email})['Item']
+        self.assertIs(user['is_paid'], True)
+        self.assertEqual(user['plan_valid_till'], '2027-04-06')
+        self.assertEqual(self.events('completed')[0]['details']['outcome'], 'failed')
+
+    def test_account_deleted_during_downgrade_is_not_recreated(self):
+        self.actual_handlers()
+        import controller
+        email = 'student@example.test'
+        self.db.UserTable.put_item(Item={'email': email, 'is_paid': True, 'plan_id': 'paid'})
+        original = controller.conditional_state_update
+        def deletion_during_downgrade(table, user, changes):
+            table.delete_item(Key={'email': email})
+            return original(table, user, changes)
+        self.patch('controller.conditional_state_update', side_effect=deletion_during_downgrade)
+        self.assertEqual(self.client.delete('/delete-payment-fields', json={'email': email}).status_code, 409)
+        self.assertNotIn('Item', self.db.UserTable.get_item(Key={'email': email}))
+
+    def test_downgrade_is_blocked_when_audit_cannot_start(self):
+        self.actual_handlers()
+        email = 'student@example.test'
+        self.db.UserTable.put_item(Item={'email': email, 'is_paid': True, 'plan_id': 'paid'})
+        self.patch_object(self.store, 'write', side_effect=AuditUnavailable())
+        self.assertEqual(self.client.delete('/delete-payment-fields', json={'email': email}).status_code, 503)
+        self.assertIs(self.db.UserTable.get_item(Key={'email': email})['Item']['is_paid'], True)
+
+    def test_logout_and_login_after_downgrade_issue_free_claims(self):
+        self.actual_handlers()
+        import controller
+        email = 'student@example.test'
+        password = 'test-only-password'
+        password_hash = controller.bcrypt.generate_password_hash(password).decode()
+        self.db.UserTable.put_item(Item={'email': email, 'password': password_hash,
+            'is_paid': True, 'plan_id': 'ugc_net_full_course_v1', 'plan_valid_till': '2027-01-06',
+            'exams_paid_for': ['qjPZtz_lecs', 'qjPZtz_mocks'], 'units_paid_for': ['unit1']})
+        self.assertEqual(self.client.delete('/delete-payment-fields', json={'email': email}).status_code, 200)
+        self.assertEqual(self.client.post('/logout').status_code, 200)
+        response = self.client.post('/login', json={'email': email, 'password': password})
+        self.assertEqual(response.status_code, 200)
+        token = self.client.get_cookie('access_token_cookie').value
+        with self.app.app_context():
+            claims = decode_token(token)
+        self.assertEqual(claims['is_paid'], 'false')
+        self.assertEqual(claims['plan_id'], 'free')
+        self.assertEqual(claims['exams_paid_for'], [])
+        self.assertEqual(claims['units_paid_for'], [])
+        profile = self.client.get('/get-user', headers={'Authorization': 'Bearer ' + token})
+        self.assertEqual(profile.status_code, 200)
+        self.assertIs(profile.json['is_paid'], False)
+        self.assertEqual(profile.json['plan_id'], 'free')
+        self.assertNotIn('password', profile.json)
+        self.assertEqual(self.db.UserTable.get_item(Key={'email': email})['Item']['password'], password_hash)
 
     def test_password_and_signed_urls_never_logged_even_when_nested(self):
         self.actual_handlers()

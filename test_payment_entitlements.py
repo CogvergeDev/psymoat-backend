@@ -220,11 +220,40 @@ class PaymentEntitlementTests(unittest.TestCase):
         self.assertEqual(res['status'], 'success')
 
         user = self.user_table.get_item(Key={'email': email})['Item']
-        self.assertNotIn('is_paid', user)
-        self.assertNotIn('plan_id', user)
-        self.assertNotIn('plan_valid_till', user)
-        self.assertNotIn('exams_paid_for', user)
-        self.assertNotIn('units_paid_for', user)
+        self.assertIs(user['is_paid'], False)
+        self.assertEqual(user['plan_id'], 'free')
+        self.assertEqual(user['plan_valid_till'], '')
+        self.assertEqual(user['exams_paid_for'], [])
+        self.assertEqual(user['units_paid_for'], [])
+        self.assertEqual(user['last_subscription_plan_id'], 'ugc_net_units_v1')
+        self.assertEqual(user['last_subscription_valid_till'], '2026-12-31T00:00:00')
+
+    def test_downgrade_preserves_credentials_payments_and_other_profile_fields(self):
+        email = 'preserve@example.com'
+        before = self._create_user(email, password='original-hash', fullName='Student',
+                                  examsTaken=['exam1'], is_paid=True,
+                                  plan_id='ugc_net_full_course_v1', plan_valid_till='2027-01-01T00:00:00+05:30')
+        payment = {'payment_id': 'pay_preserved', 'user_email': email,
+                   'status': 'captured', 'entitlement_applied': True, 'amount': 5000}
+        self.payment_table.put_item(Item=payment)
+        controller.delete_user_payment_fields(email)
+        after = self.user_table.get_item(Key={'email': email})['Item']
+        for key in ('password', 'fullName', 'examsTaken'):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(self.payment_table.get_item(Key={'payment_id': 'pay_preserved'})['Item'], payment)
+
+    def test_downgrade_recreates_previously_deleted_fields_and_is_repeatable(self):
+        email = 'missing-fields@example.com'
+        self.user_table.put_item(Item={'email': email, 'password': 'original-hash',
+                                      'last_subscription_plan_id': 'ugc_net_full_course_v1',
+                                      'last_subscription_valid_till': '2027-01-06'})
+        controller.delete_user_payment_fields(email)
+        first = self.user_table.get_item(Key={'email': email})['Item']
+        controller.delete_user_payment_fields(email)
+        self.assertEqual(self.user_table.get_item(Key={'email': email})['Item'], first)
+        self.assertEqual(first['last_subscription_valid_till'], '2027-01-06')
+        self.assertIs(first['is_paid'], False)
+        self.assertEqual(first['plan_id'], 'free')
 
     def test_cleanup_expired_user_plans(self):
         email = "expired@example.com"

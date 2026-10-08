@@ -31,7 +31,7 @@ import math
 from decimal import Decimal
 import re
 from subscription_reconciliation import (
-    conditional_state_update, free_subscription_fields, parse_expiry,
+    USER_FIELDS, conditional_state_update, free_subscription_fields, parse_expiry,
     reconciliation_preview,
 )
 
@@ -1254,29 +1254,43 @@ def save_successful_payment(payment_data: dict) -> dict:
 
 
 def delete_user_payment_fields(email: str) -> dict:
+    """Keep the legacy API name; downgrade an existing account to Free.
+
+    Retain prior subscription metadata and all payment/credential records.
+    Reject concurrent account or subscription changes instead of discarding
+    a purchase or administrative grant that arrived during this request.
     """
-    Remove is_paid, plan_id, plan_valid_till, exams_paid_for, and units_paid_for
-    from the UserTable item keyed by `email`.
-    """
+    if not isinstance(email, str):
+        raise ValueError('A valid email address is required')
+    email = email.strip()
+    if len(email) > 254 or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
+        raise ValueError('A valid email address is required')
     try:
-        resp = UserTable.update_item(
-            Key={ 'email': email },
-            UpdateExpression="REMOVE is_paid, plan_id, plan_valid_till, exams_paid_for, units_paid_for",
-            ReturnValues="UPDATED_OLD"  
-            # returns the old values of any removed attributes
-        )
-        removed = resp.get('Attributes', {}) or {}
+        names = {f'#f{i}': field for i, field in enumerate(USER_FIELDS)}
+        user = UserTable.get_item(
+            Key={'email': email}, ConsistentRead=True,
+            ProjectionExpression=', '.join(names), ExpressionAttributeNames=names,
+        ).get('Item')
+        if not user:
+            return {'status': 'error', 'error_code': 'user_not_found',
+                    'message': 'Account not found'}
+        audit_state(before=user)
+        fields = free_subscription_fields(user, expiry=user.get('plan_valid_till') or '')
+        updated = conditional_state_update(UserTable, user, fields)
+        audit_state(after={**user, **updated.get('Attributes', {})})
         return {
             'status': 'success',
-            'message': f'Removed payment fields for {email}',
-            'removed_fields': removed
+            'message': f'Account moved to the Free plan: {email}',
+            'user_update': fields,
         }
     except ClientError as e:
-        logging.error("DynamoDB error on delete: %s", e.response['Error']['Message'])
-        raise RuntimeError(
-            f"Failed to delete payment fields for {email}: "
-            f"{e.response['Error']['Message']}"
-        )
+        if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            return {'status': 'error', 'error_code': 'subscription_changed',
+                    'message': 'Account or subscription changed. Review the current account and retry.'}
+        logging.error('Free-plan downgrade failed: %s', type(e).__name__)
+        raise RuntimeError('Could not update the subscription. Please retry.') from None
+    except BotoCoreError:
+        raise RuntimeError('Could not update the subscription. Please retry.') from None
     
 
 
