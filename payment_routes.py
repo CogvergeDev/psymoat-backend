@@ -52,7 +52,7 @@ def checkout_terms(data):
     if plan == 'ugc_net_full_course_v1':
         if units:
             raise ValueError('Full course does not need unit selection')
-        amount = 5000
+        amount = 6500
     elif plan == 'ugc_net_units_v1':
         if not units or not set(units) <= UNIT_IDS:
             raise ValueError('Select valid course units')
