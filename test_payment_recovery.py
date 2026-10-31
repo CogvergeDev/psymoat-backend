@@ -28,11 +28,11 @@ class PaymentRecoveryTests(unittest.TestCase):
         self.users=self.resource.Table('User'); self.payments=self.resource.Table('PaymentHistory'); self.orders=self.resource.Table(ORDER_TABLE)
         db=SimpleNamespace(UserTable=self.users,PaymentHistoryTable=self.payments,dynamodb_resource=self.resource)
         self.gateway=MagicMock()
-        self.gateway.order.create.return_value={'id':'order_test','amount':500000,'currency':'INR'}
-        self.payment={'id':'pay_test','order_id':'order_test','amount':500000,'currency':'INR','status':'captured','amount_refunded':0,'created_at':int(datetime.now(timezone.utc).timestamp())}
+        self.gateway.order.create.return_value={'id':'order_test','amount':650000,'currency':'INR'}
+        self.payment={'id':'pay_test','order_id':'order_test','amount':650000,'currency':'INR','status':'captured','amount_refunded':0,'created_at':int(datetime.now(timezone.utc).timestamp())}
         self.gateway.payment.fetch.return_value=self.payment
         self.gateway.order.payments.return_value={'items':[self.payment]}
-        self.gateway.order.fetch.return_value={'amount':500000,'currency':'INR','notes':{}}
+        self.gateway.order.fetch.return_value={'amount':650000,'currency':'INR','notes':{}}
         self.app=Flask(__name__); self.app.config.update(TESTING=True,JWT_SECRET_KEY='test-payment-secret-with-32-characters',JWT_TOKEN_LOCATION=['headers']); JWTManager(self.app)
         install_admin_audit(self.app,db,AuditStore(self.resource.Table('AdminAuditLogs')))
         self.app.register_blueprint(create_payment_blueprint(db,self.gateway)); self.client=self.app.test_client(); self.email='student@test.com'
@@ -44,9 +44,9 @@ class PaymentRecoveryTests(unittest.TestCase):
         with self.app.app_context(): token=create_access_token(identity=email or self.email)
         return self.client.post('/razorpay/'+path,json=data or {},headers={'Authorization':'Bearer '+token})
     def create(self,**changes):
-        return self.post('order/create',dict({'plan_id':'ugc_net_full_course_v1','amount':5000,'months':3},**changes))
+        return self.post('order/create',dict({'plan_id':'ugc_net_full_course_v1','amount':6500,'months':3},**changes))
     def complete(self,**changes):
-        return self.post('order/complete',dict({'payment_id':'pay_test','order_id':'order_test','signature':'secret-signature','plan_id':'ugc_net_full_course_v1','amount':5000,'months':3},**changes))
+        return self.post('order/complete',dict({'payment_id':'pay_test','order_id':'order_test','signature':'secret-signature','plan_id':'ugc_net_full_course_v1','amount':6500,'months':3},**changes))
     def webhook(self,event='payment.captured'):
         raw=json.dumps({'event':event,'payload':{'payment':{'entity':self.payment}}},indent=2).encode()
         signature=hmac.new(b'webhook-test-secret',raw,hashlib.sha256).hexdigest()
@@ -54,11 +54,11 @@ class PaymentRecoveryTests(unittest.TestCase):
     def user(self):
         return self.users.get_item(Key={'email':self.email},ConsistentRead=True)['Item']
     def data(self,**changes):
-        return dict({'user_email':self.email,'payment_id':'pay_test','order_id':'order_test','plan_id':'ugc_net_full_course_v1','amount':5000,'months':3,'created_at':datetime.now(timezone.utc).isoformat()},**changes)
+        return dict({'user_email':self.email,'payment_id':'pay_test','order_id':'order_test','plan_id':'ugc_net_full_course_v1','amount':6500,'months':3,'created_at':datetime.now(timezone.utc).isoformat()},**changes)
     def test_order_intent_is_durable_before_checkout(self):
         self.assertEqual(self.create().status_code,200)
         row=self.orders.get_item(Key={'order_id':'order_test'})['Item']
-        self.assertEqual(row['user_email'],self.email); self.assertEqual(row['amount_paise'],500000); self.assertEqual(row['months'],3); self.assertFalse(self.user()['is_paid'])
+        self.assertEqual(row['user_email'],self.email); self.assertEqual(row['amount_paise'],650000); self.assertEqual(row['months'],3); self.assertFalse(self.user()['is_paid'])
     def test_lost_callback_recovers_on_login(self):
         self.create(); r=self.post('orders/reconcile'); self.assertEqual(r.status_code,200); self.assertEqual(r.json['count'],1)
         self.assertTrue(self.user()['is_paid']); self.assertEqual(set(self.user()['exams_paid_for']),{'qjPZtz_lecs','qjPZtz_mocks'}); self.assertEqual(self.user()['password'],'private-unchanged-hash')
@@ -89,7 +89,7 @@ class PaymentRecoveryTests(unittest.TestCase):
         self.gateway.payment.fetch.assert_not_called(); self.assertFalse(self.user()['is_paid'])
     def test_payment_amount_order_currency_refund_checked(self):
         self.create()
-        for key,value in [('amount',100),('order_id','order_wrong'),('currency','USD'),('amount_refunded',500000)]:
+        for key,value in [('amount',100),('order_id','order_wrong'),('currency','USD'),('amount_refunded',650000)]:
             with self.subTest(key=key):
                 self.gateway.payment.fetch.return_value={**self.payment,key:value}; self.assertEqual(self.complete().status_code,409); self.assertFalse(self.user()['is_paid'])
         self.assertEqual(self.payments.scan()['Count'],0)

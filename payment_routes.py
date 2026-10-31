@@ -15,6 +15,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity, create_access_tok
 from razorpay.errors import SignatureVerificationError, BadRequestError, ServerError, GatewayError
 from requests.exceptions import RequestException
 
+from api_errors import api_error
 from admin_audit import audit_state, current_audit
 from payment_settlement import SettlementConflict, settle_payment
 
@@ -47,25 +48,25 @@ def checkout_terms(data):
     plan = data.get('plan_id')
     units = data.get('unit_ids') or []
     if not isinstance(units, list) or any(not isinstance(unit, str) for unit in units):
-        raise ValueError('Invalid unit selection')
+        raise ValueError('Please select valid course units.')
     units = sorted(set(units))
     if plan == 'ugc_net_full_course_v1':
         if units:
-            raise ValueError('Full course does not need unit selection')
+            raise ValueError('Individual units cannot be selected with the full course.')
         amount = 6500
     elif plan == 'ugc_net_units_v1':
         if not units or not set(units) <= UNIT_IDS:
-            raise ValueError('Select valid course units')
+            raise ValueError('Please select valid course units.')
         amount = 500 * len(units)
     else:
-        raise ValueError('Unsupported checkout plan')
+        raise ValueError('This plan is not available for checkout. Please choose an available plan.')
     try:
         if Decimal(str(data.get('amount'))) != amount or Decimal(str(data.get('months', 3))) != 3:
-            raise ValueError('Checkout price or duration does not match the plan')
+            raise ValueError('The plan price or duration has changed. Refresh the pricing page before continuing.')
     except InvalidOperation:
-        raise ValueError('Invalid checkout price or duration') from None
+        raise ValueError('Please select a valid plan price and duration.') from None
     if data.get('currency', 'INR') != 'INR':
-        raise ValueError('Only INR is supported')
+        raise ValueError('Payments must be made in INR.')
     return {'plan_id': plan, 'months': 3, 'unit_ids': units,
             'amount': amount, 'amount_paise': amount * 100, 'currency': 'INR'}
 
@@ -88,7 +89,8 @@ def create_payment_blueprint(db, gateway):
         if payment.get('order_id') != intent['order_id'] or payment.get('currency') != intent['currency'] or payment.get('amount') != intent['amount_paise']:
             raise SettlementConflict('Gateway payment does not match the checkout order')
         if payment.get('status') != 'captured':
-            return {'status': 'pending', 'order_id': intent['order_id']}, 202
+            return {'status': 'pending', 'order_id': intent['order_id'],
+                    'message': 'Your payment is still being confirmed. If money was deducted, please do not pay again.'}, 202
         if payment.get('amount_refunded', 0) or payment.get('refund_status'):
             raise SettlementConflict('Refunded payment cannot activate access')
         after, applied = settle_payment(db.UserTable, db.PaymentHistoryTable, {
@@ -115,7 +117,8 @@ def create_payment_blueprint(db, gateway):
                 # Re-fetch by ID rather than trusting browser/webhook fields.
                 return apply(intent, gateway.payment.fetch(payment['id'], timeout=(3, 10)), source)
         audit_state(result={'order_id': intent['order_id'], 'email': intent['user_email'], 'outcome': 'pending'})
-        return {'status': 'pending', 'order_id': intent['order_id']}, 202
+        return {'status': 'pending', 'order_id': intent['order_id'],
+                'message': 'Your payment is still being confirmed. If money was deducted, please do not pay again.'}, 202
 
     def success_response(result, code):
         response = jsonify(result)
@@ -131,7 +134,7 @@ def create_payment_blueprint(db, gateway):
     @bp.errorhandler(ValueError)
     def invalid(error):
         code = 409 if isinstance(error, SettlementConflict) else 400
-        return jsonify(error=str(error)), code
+        return api_error(str(error), 'PAYMENT_CONFLICT' if code == 409 else 'INVALID_PAYMENT_INPUT', code)
 
     @bp.errorhandler(ClientError)
     @bp.errorhandler(BotoCoreError)
@@ -144,7 +147,16 @@ def create_payment_blueprint(db, gateway):
         # No raw gateway responses, secrets or account records in stdout.
         logger.error('PAYMENT_PROCESSING_UNAVAILABLE category=%s', type(error).__name__)
         audit_state(result={'error_category': type(error).__name__})
-        return jsonify(error='Payment processing is temporarily unavailable. Retry safely.'), 503
+        message = ('Checkout is temporarily unavailable. Please try again shortly.'
+                   if request.endpoint == 'payments.create_order' else
+                   'We could not confirm your payment right now. Please check its status again shortly. If money was deducted, do not pay again.')
+        return api_error(message, 'PAYMENT_SERVICE_UNAVAILABLE', 503)
+
+    @bp.errorhandler(500)
+    def unexpected(error):
+        logger.error('PAYMENT_PROCESSING_FAILED category=%s', type(error).__name__)
+        audit_state(result={'error_category': type(error).__name__})
+        return api_error('Something went wrong while processing your request. If money was deducted, check your payment status before trying to pay again.', 'PAYMENT_INTERNAL_ERROR', 500)
 
     @bp.route('/razorpay/order/create', methods=['POST'])
     @jwt_required()
@@ -203,7 +215,7 @@ def create_payment_blueprint(db, gateway):
             raise ValueError('Invalid recovery payload')
         intent = intent_for(data.get('order_id'), get_jwt_identity())
         if not intent:
-            return jsonify(error='Order has no saved checkout association'), 404
+            return api_error('We could not find this checkout. Contact support with your order reference if money was deducted.', 'PAYMENT_ORDER_NOT_FOUND', 404)
         return success_response(*reconcile(intent, 'authenticated_recovery'))
 
     @bp.route('/razorpay/orders/reconcile', methods=['POST'])
@@ -243,11 +255,11 @@ def create_payment_blueprint(db, gateway):
     def webhook():
         secret = os.getenv('RAZORPAY_WEBHOOK_SECRET')
         if not secret:
-            return jsonify(error='Payment webhook is not configured'), 503
+            return api_error('Payment notifications are temporarily unavailable.', 'PAYMENT_WEBHOOK_UNAVAILABLE', 503)
         raw = request.get_data(cache=True)
         expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, request.headers.get('X-Razorpay-Signature', '')):
-            return jsonify(error='Invalid webhook signature'), 400
+            return api_error('The payment notification could not be verified.', 'INVALID_WEBHOOK_SIGNATURE', 400)
         context = current_audit()
         if context:
             context.actor = {'authentication': 'verified_webhook', 'identity': 'razorpay'}
@@ -268,7 +280,7 @@ def create_payment_blueprint(db, gateway):
         result, code = apply(intent, payment, 'signed_webhook')
         # Retry any eventual gateway state lag; 202 would acknowledge it.
         if code == 202:
-            return jsonify(error='Gateway capture is not visible yet'), 503
+            return api_error('Payment capture is not visible yet.', 'PAYMENT_CAPTURE_PENDING', 503)
         return jsonify(status=result['status'], applied=result['applied']), code
 
     return bp

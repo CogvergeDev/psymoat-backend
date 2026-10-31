@@ -9,6 +9,7 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import BotoCoreError, ClientError
 from botocore.client import Config
 from flask import jsonify
+from api_errors import api_error
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import (
     create_access_token,
@@ -1107,18 +1108,39 @@ def admin_get_user(email: str) -> dict:
         return {'status': 'error', 'message': str(e)}
 
 # AUTHENTICATION
+def validate_credentials(email, password):
+    if not isinstance(email, str) or len(email.strip()) > 254 or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email.strip()):
+        raise ValueError('Enter a valid email address.')
+    if not isinstance(password, str) or not password:
+        raise ValueError('Enter your password.')
+    if len(password.encode('utf-8')) > 1024:
+        raise ValueError('Your password is too long.')
+    # Preserve case for existing DynamoDB keys; account normalization is separate.
+    return email.strip()
+
+
 def register(email, password, fullName):
+    try:
+        email = validate_credentials(email, password)
+        if not isinstance(fullName, str) or not fullName.strip():
+            raise ValueError('Enter your full name.')
+        if len(fullName.strip()) > 200:
+            raise ValueError('Use at most 200 characters for your name.')
+        if len(password.encode('utf-8')) > 72:
+            raise ValueError('Your password is too long. Use at most 72 bytes (some characters use more than one byte).')
+    except ValueError as error:
+        return api_error(str(error), 'INVALID_INPUT', 400)
     try:
         existing = UserTable.get_item(Key={'email': email})
         if 'Item' in existing:
-            return jsonify({'msg': 'User already exists'}), 400
+            return api_error('An account with this email already exists. Please log in.', 'ACCOUNT_EXISTS', 409)
 
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
         item = {
             'user_id': generate_id(),
             'email': email,
             'password': hashed_password,
-            'fullName': fullName,
+            'fullName': fullName.strip(),
             'joinedOn': get_time(),
             'lastLogin': '',
             'examsTaken': [],
@@ -1128,22 +1150,30 @@ def register(email, password, fullName):
             'exams_paid_for': [],
             'units_paid_for': []
         }
-        UserTable.put_item(Item=item)
-        return jsonify({'msg': 'Registration successful'}), 201
-    except (ClientError, BotoCoreError) as e:
-        return jsonify({'msg': 'DB error', 'error': str(e)}), 500
-    except Exception as e:
-        return jsonify({'msg': 'Unexpected error', 'error': str(e)}), 500
+        UserTable.put_item(Item=item, ConditionExpression='attribute_not_exists(email)')
+        return jsonify({'message': 'Account created successfully. You can now log in.', 'msg': 'Registration successful'}), 201
+    except (ClientError, BotoCoreError) as error:
+        if isinstance(error, ClientError) and error.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            return api_error('An account with this email already exists. Please log in.', 'ACCOUNT_EXISTS', 409)
+        logging.error('REGISTRATION_UNAVAILABLE category=%s', type(error).__name__)
+        return api_error('We could not create your account right now. Please try again shortly.', 'SERVICE_UNAVAILABLE', 503)
+    except Exception as error:
+        logging.error('REGISTRATION_FAILED category=%s', type(error).__name__)
+        return api_error('Something went wrong while creating your account. Please try again.', 'INTERNAL_ERROR', 500)
 
 def login(email, password):
     try:
+        email = validate_credentials(email, password)
+    except ValueError as error:
+        return api_error(str(error), 'INVALID_INPUT', 400)
+    try:
         resp = UserTable.get_item(Key={'email': email})
         if 'Item' not in resp:
-            return jsonify({'msg': 'User not found'}), 404
+            return api_error('The email address or password is incorrect.', 'INVALID_CREDENTIALS', 401)
 
         user = resp['Item']
         if not bcrypt.check_password_hash(user['password'], password):
-            return jsonify({'msg': 'Invalid credentials'}), 401
+            return api_error('The email address or password is incorrect.', 'INVALID_CREDENTIALS', 401)
 
         is_paid_val = "true" if (user.get("is_paid") in (True, 'true', 'True', 1)) else "false"
         additional_claims = {
@@ -1156,14 +1186,16 @@ def login(email, password):
         access_token = create_access_token(identity=email, additional_claims=additional_claims)
         refresh_token = create_refresh_token(identity=email)
 
-        response = jsonify({'msg': 'Login successful'})
+        response = jsonify({'message': 'Login successful.', 'msg': 'Login successful'})
         set_access_cookies(response, access_token)
         # set_refresh_cookies(response, refresh_token)
         return response, 200
-    except (ClientError, BotoCoreError) as e:
-        return jsonify({'msg': 'DB error', 'error': str(e)}), 500
-    except Exception as e:
-        return jsonify({'msg': 'Unexpected error', 'error': str(e)}), 500
+    except (ClientError, BotoCoreError) as error:
+        logging.error('LOGIN_UNAVAILABLE category=%s', type(error).__name__)
+        return api_error('Sign in is temporarily unavailable. Please try again shortly.', 'SERVICE_UNAVAILABLE', 503)
+    except Exception as error:
+        logging.error('LOGIN_FAILED category=%s', type(error).__name__)
+        return api_error('Something went wrong while signing in. Please try again.', 'INTERNAL_ERROR', 500)
 
 def refresh():
     identity = get_jwt_identity()

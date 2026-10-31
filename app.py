@@ -89,6 +89,9 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)  # Set token expiry t
 
 jwt = JWTManager(app)
 
+from api_errors import api_error, install_auth_errors
+install_auth_errors(jwt)
+
 # The catalog is additive; provisioning and import are explicit offline commands.
 from lecture_catalog import create_catalog_blueprint
 app.register_blueprint(create_catalog_blueprint(dynamodb))
@@ -463,23 +466,23 @@ def get_user_activity():
 # AUTH ROUTES
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.get_json()
-    if not data or not data.get('email') or not data.get('password') or not data.get('fullName'):
-        return jsonify({'msg': 'email, password and fullName are required'}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return api_error('Please provide your name, email address and password.', 'INVALID_INPUT', 400)
     return dynamodb.register(
-        email=data['email'],
-        password=data['password'],
-        fullName=data['fullName']
+        email=data.get('email'),
+        password=data.get('password'),
+        fullName=data.get('fullName')
     )
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    if not data or not data.get('email') or not data.get('password'):
-        return jsonify({'msg': 'email and password are required'}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return api_error('Please provide your email address and password.', 'INVALID_INPUT', 400)
     return dynamodb.login(
-        email=data['email'],
-        password=data['password']
+        email=data.get('email'),
+        password=data.get('password')
     )
 
 @app.route('/refresh', methods=['POST'])
