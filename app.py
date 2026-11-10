@@ -92,6 +92,9 @@ jwt = JWTManager(app)
 from api_errors import api_error, install_auth_errors
 install_auth_errors(jwt)
 
+from account_security import install_account_security
+install_account_security(app, dynamodb)
+
 # The catalog is additive; provisioning and import are explicit offline commands.
 from lecture_catalog import create_catalog_blueprint
 app.register_blueprint(create_catalog_blueprint(dynamodb))

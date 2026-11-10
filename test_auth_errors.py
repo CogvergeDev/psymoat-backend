@@ -15,12 +15,16 @@ from requests.exceptions import Timeout
 from api_errors import install_auth_errors
 from payment_routes import create_payment_blueprint
 from provision_payment_orders import provision
+from provision_account_operations import provision as provision_accounts
 
 
 class PublicErrorTests(unittest.TestCase):
     def setUp(self):
         self.aws = mock_aws(); self.aws.start()
-        self.env = patch.dict(os.environ, {'AWS_ACCESS_KEY_ID': 'testing', 'AWS_SECRET_ACCESS_KEY': 'testing'})
+        self.env = patch.dict(os.environ, {'AWS_ACCESS_KEY_ID': 'testing', 'AWS_SECRET_ACCESS_KEY': 'testing',
+            'ACCOUNT_TOKEN_SECRET': 'test-account-secret-at-least-32-characters', 'RESEND_API_KEY': 're_test-not-real',
+            'ACCOUNT_OPERATIONS_TABLE': 'AccountOperations', 'EMAIL_FROM': 'Psymoat <developer@example.test>',
+            'FRONTEND_URL': 'https://frontend.example.test'})
         self.env.start()
         import controller
         import app as source
@@ -30,6 +34,10 @@ class PublicErrorTests(unittest.TestCase):
             KeySchema=[{'AttributeName': 'email', 'KeyType': 'HASH'}],
             AttributeDefinitions=[{'AttributeName': 'email', 'AttributeType': 'S'}])
         self.users = self.resource.Table('User')
+        provision_accounts(self.resource)
+        self.mail = patch('account_mail.requests.post'); self.mail_mock = self.mail.start()
+        self.mail_mock.return_value.status_code = 200
+        self.mail_mock.return_value.json.return_value = {'id': 'email_test'}
         self.user_patch = patch.object(controller, 'UserTable', self.users); self.user_patch.start()
         self.app = Flask(__name__)
         self.app.config.update(TESTING=True, JWT_SECRET_KEY='test-public-error-secret-with-32-characters', JWT_TOKEN_LOCATION=['headers'])
@@ -46,7 +54,7 @@ class PublicErrorTests(unittest.TestCase):
         self.client = self.app.test_client()
 
     def tearDown(self):
-        self.user_patch.stop(); self.env.stop(); self.aws.stop()
+        self.mail.stop(); self.user_patch.stop(); self.env.stop(); self.aws.stop()
 
     def assert_error(self, response, status, code):
         self.assertEqual(response.status_code, status)

@@ -2,6 +2,8 @@
 
 import os
 import secrets
+import hashlib
+from types import SimpleNamespace
 import string
 import boto3
 from boto3 import resource
@@ -10,6 +12,8 @@ from botocore.exceptions import BotoCoreError, ClientError
 from botocore.client import Config
 from flask import jsonify
 from api_errors import api_error
+from account_mail import new_job, put_job, try_deliver
+from account_security import password_version, public_user
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import (
     create_access_token,
@@ -956,7 +960,7 @@ def get_user(email):
         if 'Item' not in resp:
             return {'error': 'User not found!'}, 404
         user = resp['Item']
-        user.pop('password', None)
+        user = public_user(user)
         user.setdefault('exams_paid_for', [])
         user.setdefault('units_paid_for', [])
         return user
@@ -1102,7 +1106,7 @@ def admin_get_user(email: str) -> dict:
         if 'Item' not in resp:
             return {'status': 'error', 'message': 'User not found!'}
         user = resp['Item']
-        user.pop('password', None)
+        user = public_user(user)
         return {'status': 'success', 'user': user}
     except Exception as e:
         return {'status': 'error', 'message': str(e)}
@@ -1150,10 +1154,22 @@ def register(email, password, fullName):
             'exams_paid_for': [],
             'units_paid_for': []
         }
-        UserTable.put_item(Item=item, ConditionExpression='attribute_not_exists(email)')
-        return jsonify({'message': 'Account created successfully. You can now log in.', 'msg': 'Registration successful'}), 201
+        account_db = SimpleNamespace(UserTable=UserTable, dynamodb_resource=dynamodb_resource)
+        # Persist the welcome job atomically with account creation. Delivery
+        # errors after this commit cannot make signup appear unsuccessful.
+        welcome_id = 'welcome-' + hashlib.sha256((email + '|' + item['user_id']).encode()).hexdigest()
+        job = new_job('welcome', email, name=item['fullName'], job_id=welcome_id)
+        UserTable.meta.client.transact_write_items(TransactItems=[
+            {'Put': {'TableName': UserTable.name, 'Item': item, 'ConditionExpression': 'attribute_not_exists(email)'}},
+            put_job(job, account_db),
+        ], ClientRequestToken=secrets.token_hex(16))
+        delivery = try_deliver(account_db, job['pk'])
+        return jsonify({'message': 'Account created successfully. You can now log in.', 'msg': 'Registration successful',
+                        'email_status': 'sent' if delivery == 'accepted' else 'queued'}), 201
     except (ClientError, BotoCoreError) as error:
-        if isinstance(error, ClientError) and error.response['Error']['Code'] == 'ConditionalCheckFailedException':
+        if isinstance(error, ClientError) and (error.response['Error']['Code'] == 'ConditionalCheckFailedException' or
+                (error.response['Error']['Code'] == 'TransactionCanceledException' and
+                 (error.response.get('CancellationReasons') or [{}])[0].get('Code') == 'ConditionalCheckFailed')):
             return api_error('An account with this email already exists. Please log in.', 'ACCOUNT_EXISTS', 409)
         logging.error('REGISTRATION_UNAVAILABLE category=%s', type(error).__name__)
         return api_error('We could not create your account right now. Please try again shortly.', 'SERVICE_UNAVAILABLE', 503)
@@ -1177,6 +1193,7 @@ def login(email, password):
 
         is_paid_val = "true" if (user.get("is_paid") in (True, 'true', 'True', 1)) else "false"
         additional_claims = {
+            'auth_version': password_version(user),
             "is_paid": is_paid_val,
             "plan_id": user.get("plan_id", ""),
             "exams_paid_for": user.get("exams_paid_for", []),
