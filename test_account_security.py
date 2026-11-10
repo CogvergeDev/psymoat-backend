@@ -203,11 +203,41 @@ class AccountSecurityTests(unittest.TestCase):
         self.assertEqual(len(self.mails('password_reset')), 2)
 
     def test_repeat_requests_are_durable_and_do_not_send_again(self):
-        first = self.forgot()
-        # Fresh Flask client simulates another process/browser using the same table.
-        response = self.app.test_client().post('/forgot-password', json={'email': self.email})
+        with patch('account_mail.time.time', return_value=time.time()):
+            first = self.forgot()
+            # A fresh browser still uses the same persisted cooldown.
+            response = self.app.test_client().post('/forgot-password', json={'email': self.email})
         self.assertEqual(first.json, response.json); self.assertEqual(len(self.mails('password_reset')), 1)
         self.assertEqual(self.http.call_count, 1)
+
+    def test_reset_cooldown_and_hourly_cap_are_identical_for_every_address(self):
+        start = int(time.time())
+        for offset, retry_after, remaining in [
+            (0, 60, 4), (59, 1, 4), (60, 120, 3), (180, 180, 2),
+            (360, 240, 1), (600, 3000, 0), (601, 2999, 0), (3600, 60, 4),
+        ]:
+            with self.subTest(offset=offset), patch('account_mail.time.time', return_value=start + offset):
+                known = self.forgot(environ_overrides={'REMOTE_ADDR': '192.0.2.1'})
+                unknown = self.forgot('unknown@example.test', environ_overrides={'REMOTE_ADDR': '192.0.2.2'})
+                self.assertEqual(known.status_code, 200)
+                self.assertEqual(known.json, unknown.json)
+                self.assertEqual(known.json['retry_after'], retry_after)
+                self.assertEqual(known.json['attempts_remaining'], remaining)
+        self.assertEqual(len(self.mails('password_reset')), 6)
+        self.assertEqual(self.http.call_count, 6)
+
+    def test_branded_templates_keep_the_logo_separate_from_reset_links(self):
+        with self.app.app_context():
+            for kind, route in [('welcome', '/login'), ('password_reset', '/reset-password#token='),
+                                ('password_changed', '/forgot-password')]:
+                job = account_mail.new_job(kind, self.email, name='Student')
+                branded = account_mail.render_job(job)
+                previous = account_mail.render_job({**job, 'template_version': 1})
+                self.assertIn('src="https://frontend.example.test/images/logo.jpeg"', branded['html'])
+                self.assertNotIn('<img ', previous['html'])
+                self.assertIn('href="https://frontend.example.test' + route, branded['html'])
+                self.assertIn('https://frontend.example.test' + route, branded['text'])
+                self.assertEqual(branded['subject'], previous['subject'])
 
     def test_forgot_ip_limit_ignores_spoofed_forwarded_headers(self):
         for i in range(10):

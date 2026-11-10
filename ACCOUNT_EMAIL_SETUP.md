@@ -126,9 +126,12 @@ rows to pending. Reset emails expire after 30 minutes; stale links are never sen
 
 ## Routes and security behavior
 
-- `POST /forgot-password`: same public response for existing and unknown emails,
-  cooldown of at least 60 seconds, at most five requests per email/hour and ten
-  requests per IP/15 minutes. Limits are persisted with HMAC-protected keys.
+- `POST /forgot-password`: same public response for existing and unknown emails.
+  Returns `retry_after` in seconds and `attempts_remaining` for the supplied
+  address. Each address gets five requests in an hour starting at its first
+  request. The waits before requests two through five are 60, 120, 180 and 240
+  seconds. The IP limit remains ten requests per 15 minutes. Limits are
+  persisted with HMAC-protected keys.
 - `POST /reset-password`: token, `new_password`, and `confirm_password`; new
   password needs at least 8 characters and at most 72 UTF-8 bytes. Twenty reset
   attempts per IP/15 minutes. Links expire after 30 minutes, are single use, and

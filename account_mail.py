@@ -22,6 +22,8 @@ import requests
 TABLE_NAME = 'AccountOperations'
 QUEUE_INDEX = 'PendingEmails'
 RESET_SECONDS = 1800
+RESET_REQUEST_MAX = 5
+RESET_REQUEST_WINDOW = 3600
 AMBIGUOUS_RETRY_SECONDS = 23 * 3600
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,7 @@ def new_job(kind, email, *, name='', job_id=None):
             'frontend_url': frontend_url(), 'status': 'pending', 'queue': 'pending',
             'next_attempt': now, 'attempts': 0,
             'expires_at': now + (RESET_SECONDS if kind == 'password_reset' else 7 * 86400),
-            'ttl': now + 30 * 86400, 'template_version': 1}
+            'ttl': now + 30 * 86400, 'template_version': 2}
 
 
 def put_job(job, db):
@@ -113,12 +115,87 @@ def render_job(job):
         action = 'Start learning'
     else:
         raise ValueError('Unknown account email type')
-    text = '\n\n'.join(paragraphs + [action + ': ' + link, 'The Psymoat team'])
-    html = ('<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px;margin:auto;padding:24px">'
-            '<h1>Psymoat</h1>' + ''.join('<p>' + escape(p) + '</p>' for p in paragraphs)
-            + '<p><a href="' + escape(link, quote=True) + '" style="background:#58cc02;color:#111;padding:12px 18px;display:inline-block;border-radius:8px">'
-            + action + '</a></p><p>The Psymoat team</p></div>')
+    if job.get('template_version', 1) == 1:
+        # Resend retries must use the same payload as the first attempt.
+        text = '\n\n'.join(paragraphs + [action + ': ' + link, 'The Psymoat team'])
+        html = ('<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:560px;margin:auto;padding:24px">'
+                '<h1>Psymoat</h1>' + ''.join('<p>' + escape(p) + '</p>' for p in paragraphs)
+                + '<p><a href="' + escape(link, quote=True) + '" style="background:#58cc02;color:#111;padding:12px 18px;display:inline-block;border-radius:8px">'
+                + action + '</a></p><p>The Psymoat team</p></div>')
+    else:
+        note = ''
+        if job['kind'] == 'welcome':
+            heading = 'Welcome to Psymoat'
+            greeting = f"Hi {job['name'].strip()}," if job['name'].strip() else 'Hi there,'
+            paragraphs = [greeting, 'Your account is ready. Sign in whenever you’d like to start studying.']
+            action = 'Sign in'
+        elif job['kind'] == 'password_reset':
+            heading = 'Reset your password'
+            paragraphs = ['Use the link below to choose a new password. The link works once and expires in 30 minutes.']
+            action = 'Reset my password'
+            note = 'If you didn’t request a reset, you can ignore this email.'
+        else:
+            heading = 'Your password was changed'
+            paragraphs = ['We signed you out of Psymoat on all devices. Use your new password the next time you sign in.',
+                          'If you didn’t make this change, reset your password now or email developer@psymoat.in.']
+        text = '\n\n'.join(paragraphs + [action + ': ' + link] + ([note] if note else []) + ['The Psymoat team'])
+        html = branded_email(base, heading, paragraphs, link, action, note)
     return {'from': job['sender'], 'to': [job['email']], 'subject': subject, 'text': text, 'html': html}
+
+
+def branded_email(base, heading, paragraphs, link, action, note):
+    content = ''.join(f'<p style="margin:0 0 16px">{escape(paragraph)}</p>' for paragraph in paragraphs)
+    logo = escape(base + '/images/logo.jpeg', quote=True)
+    href = escape(link, quote=True)
+    if note:
+        # Keep the reset action easy to find in the security email.
+        cta = f"""<table role="presentation" cellspacing="0" cellpadding="0"><tr>
+<td bgcolor="#286321" style="border-radius:5px;mso-padding-alt:10px 16px">
+<a href="{href}" style="display:inline-block;padding:10px 16px;color:#fff;font-size:15px;font-weight:bold;text-decoration:none;mso-padding-alt:0">{escape(action)}</a>
+</td></tr></table>"""
+        follow_up = f'<p class="email-muted" style="margin:18px 0 0;color:#555b55">{escape(note)}</p>'
+    else:
+        cta = f'<p style="margin:0"><a class="email-link" href="{href}" style="color:#276323;text-decoration:underline;font-weight:bold">{escape(action)}</a></p>'
+        follow_up = ''
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<style>
+@media only screen and (max-width:480px) {{
+  .email-frame {{padding:26px 22px 32px!important}}
+}}
+@media (prefers-color-scheme:dark) {{
+  .email-bg {{background:#191a19!important}}
+  .email-copy {{color:#f0f1ef!important}}
+  .email-muted {{color:#bfc3be!important}}
+  .email-rule {{border-color:#3b3e3b!important}}
+  .email-link {{color:#a5d39a!important}}
+}}
+</style></head>
+<body class="email-bg" style="margin:0;padding:0;background:#fff">
+<table role="presentation" class="email-bg" width="100%" cellspacing="0" cellpadding="0" style="background:#fff">
+<tr><td class="email-frame" align="center" style="padding:34px 24px 38px">
+<!--[if mso]><table role="presentation" width="520" cellspacing="0" cellpadding="0"><tr><td><![endif]-->
+<table role="presentation" class="email-content" width="100%" cellspacing="0" cellpadding="0"
+  style="max-width:520px;text-align:left;font-family:Arial,sans-serif">
+<tr><td class="email-rule" style="padding:0 0 16px;border-bottom:1px solid #e3e6e2">
+<table role="presentation" cellspacing="0" cellpadding="0"><tr>
+<td valign="middle"><img src="{logo}" width="28" height="28" alt="" style="display:block;border-radius:6px"></td>
+<td valign="middle" class="email-copy" style="padding-left:9px;font-size:16px;font-weight:bold;color:#202320">Psymoat</td>
+</tr></table></td></tr>
+<tr><td class="email-copy" style="padding-top:23px;color:#202320;font-size:16px;line-height:1.55">
+<h1 style="margin:0 0 15px;font-size:23px;line-height:1.25;font-weight:bold">{escape(heading)}</h1>
+{content}
+{cta}
+{follow_up}
+<p class="email-muted" style="margin:22px 0 0;color:#555b55">The Psymoat team</p>
+</td></tr>
+</table>
+<!--[if mso]></td></tr></table><![endif]-->
+</td></tr></table>
+</body></html>"""
 
 
 def finish(db, job, owner, status, **fields):
@@ -227,9 +304,44 @@ def drain(db, limit=1):
     return counts
 
 
-def take_limit(db, scope, value, maximum, window):
+def limit_digest(scope, value):
     # HMAC prevents leaked rate-limit rows revealing email/IP addresses.
-    digest = hmac.new(secret(), (scope + '|' + value).encode(), hashlib.sha256).hexdigest()
+    return hmac.new(secret(), (scope + '|' + value).encode(), hashlib.sha256).hexdigest()
+
+
+def reserve_reset_request(db, email):
+    """Reserve a request before looking up the user, for any supplied address."""
+    jobs = table(db)
+    key = {'pk': 'RESET_LIMIT#' + limit_digest('forgot-email', email.casefold())}
+    while True:
+        now = int(time.time())
+        current = jobs.get_item(Key=key, ConsistentRead=True).get('Item')
+        if current and current['retry_at'] > now:
+            return False, int(current['retry_at']) - now, RESET_REQUEST_MAX - int(current['attempts'])
+
+        if current and current['window_end'] > now:
+            window_end = int(current['window_end'])
+            attempts = int(current['attempts']) + 1
+        else:
+            window_end = now + RESET_REQUEST_WINDOW
+            attempts = 1
+        remaining = RESET_REQUEST_MAX - attempts
+        retry_at = now + attempts * 60 if remaining else window_end
+        try:
+            jobs.put_item(
+                Item={**key, 'attempts': attempts, 'retry_at': retry_at,
+                      'window_end': window_end, 'ttl': max(window_end, retry_at) + RESET_REQUEST_WINDOW},
+                ConditionExpression='attribute_not_exists(pk) OR retry_at <= :now',
+                ExpressionAttributeValues={':now': now},
+            )
+            return True, retry_at - now, remaining
+        except ClientError as error:
+            if error.response['Error']['Code'] != 'ConditionalCheckFailedException':
+                raise
+
+
+def take_limit(db, scope, value, maximum, window):
+    digest = limit_digest(scope, value)
     now = int(time.time()); bucket = now // window
     key = f'LIMIT#{scope}#{digest}#{bucket}'
     try:

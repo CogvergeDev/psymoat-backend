@@ -14,11 +14,11 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required, unset_jw
 
 from api_errors import api_error
 from account_mail import (MailConfigurationError, RESET_SECONDS, drain, new_job,
-                          put_job, reset_token, secret, table, take_limit,
+                          put_job, reserve_reset_request, reset_token, table, take_limit,
                           token_digest, try_deliver)
 
 logger = logging.getLogger(__name__)
-RESET_MESSAGE = 'If an account exists for that email, we will send a password reset link. Check your inbox and spam folder. Please wait one minute before requesting another link.'
+RESET_MESSAGE = 'Check your inbox and spam folder for a Psymoat reset link.'
 
 
 def password_version(user):
@@ -132,18 +132,17 @@ def install_account_security(app, db):
         if not isinstance(email, str) or len(email.strip()) > 254 or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email.strip()):
             raise ValueError('Enter a valid email address.')
         email = email.strip()
-        secret()  # Same configuration checks apply to existing/unknown users.
         if not limit('forgot-ip', peer(), 10, 900):
             return api_error('Too many reset requests. Please wait 15 minutes before trying again.', 'RATE_LIMITED', 429)
-        if not limit('forgot-email', email.casefold(), 1, 60):
-            return jsonify(message=RESET_MESSAGE), 200
-        if not limit('forgot-email-hour', email.casefold(), 5, 3600):
-            return jsonify(message=RESET_MESSAGE), 200
         # Validate sender/link configuration equally for every supplied address.
         job = new_job('password_reset', email)
+        allowed, retry_after, attempts_remaining = reserve_reset_request(db, email)
+        response = jsonify(message=RESET_MESSAGE, retry_after=retry_after, attempts_remaining=attempts_remaining)
+        if not allowed:
+            return response
         user = db.UserTable.get_item(Key={'email': email}, ConsistentRead=True).get('Item')
         if not user or not user.get('password'):
-            return jsonify(message=RESET_MESSAGE), 200
+            return response
         now = int(time.time())
         digest = token_digest(reset_token(job))
         transaction = [put_job(job, db), {'Update': {
@@ -157,10 +156,10 @@ def install_account_security(app, db):
             if error.response['Error']['Code'] == 'TransactionCanceledException':
                 reasons = error.response.get('CancellationReasons', [])
                 if any(r.get('Code') == 'ConditionalCheckFailed' for r in reasons):
-                    return jsonify(message=RESET_MESSAGE), 200
+                    return response
             raise
         try_deliver(db, job['pk'])
-        return jsonify(message=RESET_MESSAGE), 200
+        return response
 
     def save_password(user, password, *, digest=None):
         if db.bcrypt.check_password_hash(user['password'], password):
