@@ -14,6 +14,7 @@ from flask import jsonify
 from api_errors import api_error
 from account_mail import new_job, put_job, try_deliver
 from account_security import password_version, public_user
+from course_plans import FULL_COURSE_TERMS
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import (
     create_access_token,
@@ -2062,7 +2063,7 @@ def grant_paid_access(email: str, plan_id: str, plan_valid_till: str, exam_ids: 
         current_units = list(user.get('units_paid_for', []) or [])
 
         # Case A: UGC NET Full Course
-        if plan_id == 'ugc_net_full_course_v1':
+        if isinstance(plan_id, str) and plan_id in FULL_COURSE_TERMS:
             to_add = ["qjPZtz_lecs", "qjPZtz_mocks"]
             if exam_ids:
                 to_add.extend(exam_ids)

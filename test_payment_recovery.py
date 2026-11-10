@@ -8,10 +8,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 import boto3
+from dateutil.relativedelta import relativedelta
 from flask import Flask
 from flask_jwt_extended import JWTManager, create_access_token
 from moto import mock_aws
 from admin_audit import AuditStore, install_admin_audit
+from course_plans import MONTHLY_FULL_COURSE_PLAN_ID
 from payment_routes import create_payment_blueprint, ORDER_TABLE
 from payment_settlement import settle_payment, SettlementConflict
 from provision_payment_orders import provision
@@ -59,6 +61,34 @@ class PaymentRecoveryTests(unittest.TestCase):
         self.assertEqual(self.create().status_code,200)
         row=self.orders.get_item(Key={'order_id':'order_test'})['Item']
         self.assertEqual(row['user_email'],self.email); self.assertEqual(row['amount_paise'],650000); self.assertEqual(row['months'],3); self.assertFalse(self.user()['is_paid'])
+    def test_monthly_full_course_grants_one_calendar_month(self):
+        monthly = {'plan_id': MONTHLY_FULL_COURSE_PLAN_ID, 'amount': 2500, 'months': 1}
+        for invalid in ({'amount': 6500}, {'months': 3}, {'unit_ids': ['paper-1-communication']}):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(self.create(**{**monthly, **invalid}).status_code, 400)
+        self.gateway.order.create.assert_not_called()
+        self.assertEqual(self.complete(**monthly).status_code, 409)
+
+        self.gateway.order.create.return_value = {'id': 'order_test', 'amount': 250000, 'currency': 'INR'}
+        self.payment['amount'] = 250000
+        response = self.create(**monthly)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['data']['amount'], 250000)
+        notes = self.gateway.order.create.call_args.args[0]['notes']
+        self.assertEqual(notes['months'], '1')
+        self.assertEqual(notes['plan_id'], MONTHLY_FULL_COURSE_PLAN_ID)
+
+        now = datetime(2026, 1, 31, 12, tzinfo=timezone.utc)
+        with patch('payment_settlement.datetime', wraps=datetime) as clock:
+            clock.now.return_value = now
+            self.assertEqual(self.webhook().status_code, 200)
+        user = self.user()
+        self.assertEqual(user['plan_id'], MONTHLY_FULL_COURSE_PLAN_ID)
+        self.assertEqual(set(user['exams_paid_for']), {'qjPZtz_lecs', 'qjPZtz_mocks'})
+        self.assertEqual(datetime.fromisoformat(user['plan_valid_till']), now + relativedelta(months=1))
+        self.assertEqual(self.payments.get_item(Key={'payment_id': 'pay_test'})['Item']['months'], 1)
+        self.assertFalse(self.complete(**monthly).json['applied'])
+        self.assertEqual(self.user()['plan_valid_till'], user['plan_valid_till'])
     def test_lost_callback_recovers_on_login(self):
         self.create(); r=self.post('orders/reconcile'); self.assertEqual(r.status_code,200); self.assertEqual(r.json['count'],1)
         self.assertTrue(self.user()['is_paid']); self.assertEqual(set(self.user()['exams_paid_for']),{'qjPZtz_lecs','qjPZtz_mocks'}); self.assertEqual(self.user()['password'],'private-unchanged-hash')

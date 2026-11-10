@@ -10,6 +10,7 @@ from botocore.exceptions import ClientError
 from dateutil.relativedelta import relativedelta
 
 from admin_audit import audit_state, audit_child_start, audit_child_finish
+from course_plans import FULL_COURSE_TERMS
 from subscription_reconciliation import parse_expiry
 
 IST = ZoneInfo('Asia/Kolkata')
@@ -61,7 +62,7 @@ def settle_payment(users, payments, data, *, orders=None, now=None):
         exams = list(user.get('exams_paid_for') or []) if active else []
         units = list(user.get('units_paid_for') or []) if active else []
         plan = data['plan_id']
-        if plan == 'ugc_net_full_course_v1':
+        if plan in FULL_COURSE_TERMS:
             exam_additions = ['qjPZtz_lecs', 'qjPZtz_mocks']
         elif plan == 'ugc_net_units_v1':
             exam_additions = []

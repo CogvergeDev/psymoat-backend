@@ -17,6 +17,7 @@ from requests.exceptions import RequestException
 
 from api_errors import api_error
 from admin_audit import audit_state, current_audit
+from course_plans import FULL_COURSE_TERMS, MONTHLY_FULL_COURSE_PLAN_ID
 from payment_settlement import SettlementConflict, settle_payment
 
 ORDER_TABLE = 'PaymentOrders'
@@ -50,24 +51,25 @@ def checkout_terms(data):
     if not isinstance(units, list) or any(not isinstance(unit, str) for unit in units):
         raise ValueError('Please select valid course units.')
     units = sorted(set(units))
-    if plan == 'ugc_net_full_course_v1':
+    if isinstance(plan, str) and plan in FULL_COURSE_TERMS:
         if units:
             raise ValueError('Individual units cannot be selected with the full course.')
-        amount = 6500
+        amount, months = FULL_COURSE_TERMS[plan]
     elif plan == 'ugc_net_units_v1':
         if not units or not set(units) <= UNIT_IDS:
             raise ValueError('Please select valid course units.')
         amount = 500 * len(units)
+        months = 3
     else:
         raise ValueError('This plan is not available for checkout. Please choose an available plan.')
     try:
-        if Decimal(str(data.get('amount'))) != amount or Decimal(str(data.get('months', 3))) != 3:
+        if Decimal(str(data.get('amount'))) != amount or Decimal(str(data.get('months', months))) != months:
             raise ValueError('The plan price or duration has changed. Refresh the pricing page before continuing.')
     except InvalidOperation:
         raise ValueError('Please select a valid plan price and duration.') from None
     if data.get('currency', 'INR') != 'INR':
         raise ValueError('Payments must be made in INR.')
-    return {'plan_id': plan, 'months': 3, 'unit_ids': units,
+    return {'plan_id': plan, 'months': months, 'unit_ids': units,
             'amount': amount, 'amount_paise': amount * 100, 'currency': 'INR'}
 
 
@@ -170,7 +172,7 @@ def create_payment_blueprint(db, gateway):
             raise SettlementConflict('Account no longer exists')
         order = gateway.order.create({'amount': terms['amount_paise'], 'currency': 'INR',
             'payment_capture': 1, 'receipt': uuid4().hex,
-            'notes': {'user_email': email, 'plan_id': terms['plan_id'], 'months': '3'}}, timeout=(3, 10))
+            'notes': {'user_email': email, 'plan_id': terms['plan_id'], 'months': str(terms['months'])}}, timeout=(3, 10))
         if order.get('amount') != terms['amount_paise'] or order.get('currency') != 'INR':
             raise SettlementConflict('Gateway created an unexpected order')
         intent = {**terms, 'order_id': order['id'], 'user_email': email, 'pending_user': email,
@@ -193,6 +195,8 @@ def create_payment_blueprint(db, gateway):
             raise ValueError('Invalid payment signature') from None
         email = get_jwt_identity()
         intent = intent_for(data['order_id'], email)
+        if intent is None and data.get('plan_id') == MONTHLY_FULL_COURSE_PLAN_ID:
+            raise SettlementConflict('Monthly Full Course checkout requires a saved order')
         payment = gateway.payment.fetch(data['payment_id'], timeout=(3, 10))
         if intent is None:
             # Compatibility for checkouts opened before this deployment. The
