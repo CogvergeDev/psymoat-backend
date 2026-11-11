@@ -353,10 +353,7 @@ def add_to_module(module_id):
         processed.append(row)
 
     try:
-        # Pass the counts of new questions being added
-        paid_count = paid_counter - 1  # Subtract 1 because counter starts at 1
-        free_count = free_counter - 1
-        result = dynamodb.add_questions_to_module(module_id, processed, paid_count, free_count)
+        result = dynamodb.add_questions_to_module(module_id, processed)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

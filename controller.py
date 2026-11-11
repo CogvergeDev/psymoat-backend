@@ -26,6 +26,7 @@ from flask_jwt_extended import (
 )
 from datetime import datetime, timedelta
 import logging
+from time import sleep
 from admin_audit import audit_state, audit_child_start, audit_child_finish
 from dateutil.relativedelta import relativedelta
 from dateutil import parser
@@ -71,6 +72,7 @@ ExamTable = dynamodb_resource.Table('Exam')
 ModuleTable = dynamodb_resource.Table('Module')
 QNAHistoryTable = dynamodb_resource.Table('QNAHistory')
 QuestionTable = dynamodb_resource.Table('Questions')
+QUESTION_DIFFICULTIES = ("Easy", "Medium", "Hard")
 PaymentHistoryTable = dynamodb_resource.Table('PaymentHistoryTable')
 LectureTable = dynamodb_resource.Table('Lecture')
 MockTestTable = dynamodb_resource.Table('MockTest')
@@ -429,102 +431,159 @@ def get_all_questions(module_id: str) -> list:
         # re‐raise or log however you prefer
         raise
 
-def add_questions_to_module(module_id: str, rows: list, paid_count: int, free_count: int) -> dict:
-    """
-    Takes a list of question rows and adds them to the module.
-    Updates total, paid, and free question counts.
-    """
+def batch_get_question_metadata(table, key_name, keys, fields):
+    items = {}
+    for start in range(0, len(keys), 100):
+        pending = {table.name: {
+            "Keys": [{key_name: key} for key in keys[start:start + 100]],
+            "ProjectionExpression": ", ".join(["#id", *fields]),
+            "ExpressionAttributeNames": {"#id": key_name},
+            "ConsistentRead": True,
+        }}
+        for attempt in range(4):
+            response = table.meta.client.batch_get_item(RequestItems=pending)
+            items.update({
+                item[key_name]: item for item in response.get("Responses", {}).get(table.name, [])
+            })
+            pending = response.get("UnprocessedKeys", {})
+            if not pending:
+                break
+            if attempt < 3:
+                sleep(0.02 * 2 ** attempt)
+        else:
+            raise RuntimeError(f"Unprocessed metadata reads for {table.name}")
+    return items
+
+
+def stored_difficulty_counts(module):
+    counts = module.get("questionDifficultyCounts")
+    if isinstance(counts, dict) and all(
+        type(counts.get(level)) in (int, Decimal)
+        and counts[level] >= 0
+        and counts[level] == int(counts[level])
+        for level in QUESTION_DIFFICULTIES
+    ):
+        return {level: int(counts[level]) for level in QUESTION_DIFFICULTIES}
+    return None
+
+
+def question_bank_revision_condition(module):
+    values = {}
+    condition = "attribute_exists(module_id) AND attribute_not_exists(questionBankRevision)"
+    if "questionBankRevision" in module:
+        condition = "attribute_exists(module_id) AND questionBankRevision = :previous_revision"
+        values[":previous_revision"] = module["questionBankRevision"]
+    return condition, values
+
+
+def add_questions_to_module(module_id: str, rows: list) -> dict:
+    """Import questions and update the module's counters in the same transactions."""
     if not module_id or not rows:
         raise ValueError("Module ID and questions are required")
 
+    items = {}
+    for row in rows:
+        required_fields = ['Question', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Correct Answer']
+        missing = [field for field in required_fields if not row.get(field)]
+        if missing:
+            raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+        qid = row['question_id']
+        if not qid.startswith(f"{module_id}_"):
+            raise ValueError(f"Question {qid} does not belong to module {module_id}")
+        items.setdefault(qid, {
+            'module_id': module_id,
+            'question_id': qid,
+            'question': row['Question'].strip(),
+            'options': [row[f'Option {number}'].strip() for number in range(1, 5)],
+            'correct_answer': row['Correct Answer'].strip(),
+            'explanation': row.get('Explanation', '').strip(),
+            'difficulty': row.get('Difficulty', 'Medium').strip(),
+            'is_paid': row['is_paid'],
+        })
+
     try:
-        # Check if module exists
-        resp = ModuleTable.get_item(
-            Key={'module_id': module_id}
-        )
-        if 'Item' not in resp:
-            raise ValueError(f"Module {module_id} not found")
-
-        existing_questions = resp['Item'].get('questions', [])
-        existing_count = resp['Item'].get('numberOfQuestions', 0)
-        existing_paid = resp['Item'].get('numberOfPaidQuestions', 0)
-        existing_free = resp['Item'].get('numberOfFreeQuestions', 0)
-
-        # Process and validate each question
-        new_ids = []
-        for row in rows:
-            # Validate required fields
-            required_fields = ['Question', 'Option 1', 'Option 2', 'Option 3', 'Option 4', 'Correct Answer']
-            missing = [f for f in required_fields if not row.get(f)]
-            if missing:
-                raise ValueError(f"Missing required fields: {', '.join(missing)}")
-
-            qid = row['question_id']
-            if qid in existing_questions:
-                continue  # Skip duplicates
-
-            # Create question item with proper attribute handling
-            item = {
-                'module_id': module_id,
-                'question_id': qid,
-                'question': row['Question'].strip(),
-                'options': [
-                    row['Option 1'].strip(),
-                    row['Option 2'].strip(),
-                    row['Option 3'].strip(),
-                    row['Option 4'].strip()
-                ],
-                'correct_answer': row['Correct Answer'].strip(),
-                'explanation': row.get('Explanation', '').strip(),
-                'difficulty': row.get('Difficulty', 'Medium').strip(),
-                'is_paid': row['is_paid']
+        remaining = list(items)
+        conflicts = 0
+        while True:
+            module = ModuleTable.get_item(
+                Key={'module_id': module_id}, ConsistentRead=True
+            ).get('Item')
+            if module is None:
+                raise ValueError(f"Module {module_id} not found")
+            existing_questions = module.get('questions', [])
+            result = {
+                'questions': existing_questions,
+                'numberOfQuestions': module.get('numberOfQuestions', 0),
+                'numberOfPaidQuestions': module.get('numberOfPaidQuestions', 0),
+                'numberOfFreeQuestions': module.get('numberOfFreeQuestions', 0),
             }
+            existing_ids = set(existing_questions)
+            remaining = [qid for qid in remaining if qid not in existing_ids]
+            if not remaining:
+                return result
 
-            # Write to QuestionTable
+            # Leave space under DynamoDB's 4 MB transaction limit even for large items.
+            batch = remaining[:8]
+            counts = stored_difficulty_counts(module)
+            if counts is not None:
+                previous = batch_get_question_metadata(QuestionTable, "question_id", batch, ["difficulty"])
+                for qid in batch:
+                    old_level = previous.get(qid, {}).get("difficulty")
+                    new_level = items[qid]["difficulty"]
+                    if old_level in QUESTION_DIFFICULTIES:
+                        counts[old_level] -= 1
+                    if new_level in QUESTION_DIFFICULTIES:
+                        counts[new_level] += 1
+
+            added_paid = sum(bool(items[qid]['is_paid']) for qid in batch)
+            condition, values = question_bank_revision_condition(module)
+            values.update({
+                ':empty': [],
+                ':ids': batch,
+                ':total': result['numberOfQuestions'] + len(batch),
+                ':paid': result['numberOfPaidQuestions'] + added_paid,
+                ':free': result['numberOfFreeQuestions'] + len(batch) - added_paid,
+                ':revision': secrets.token_hex(16),
+            })
+            update = (
+                "SET questions = list_append(if_not_exists(questions, :empty), :ids), "
+                "numberOfQuestions = :total, numberOfPaidQuestions = :paid, "
+                "numberOfFreeQuestions = :free, questionBankRevision = :revision"
+            )
+            if counts is not None:
+                if all(count >= 0 for count in counts.values()):
+                    update += ", questionDifficultyCounts = :counts"
+                    values[":counts"] = counts
+                else:
+                    update += " REMOVE questionDifficultyCounts"
+
+            transaction = [
+                {'Put': {'TableName': QuestionTable.name, 'Item': items[qid]}}
+                for qid in batch
+            ]
+            transaction.append({'Update': {
+                'TableName': ModuleTable.name,
+                'Key': {'module_id': module_id},
+                'ConditionExpression': condition,
+                'UpdateExpression': update,
+                'ExpressionAttributeValues': values,
+            }})
             try:
-                QuestionTable.put_item(Item=item)
-                new_ids.append(qid)
-            except (ClientError, BotoCoreError) as e:
-                raise RuntimeError(f"Failed to write question {qid}: {e}")
-
-        if not new_ids:
-            return {
-                'numberOfQuestions': existing_count,
-                'numberOfPaidQuestions': existing_paid,
-                'numberOfFreeQuestions': existing_free,
-                'questions': existing_questions
-            }
-
-        # Update ModuleTable with all counts
-        update_expr = """
-            SET questions = list_append(if_not_exists(questions, :empty), :new_ids), 
-                numberOfQuestions = :new_count,
-                numberOfPaidQuestions = :paid_count,
-                numberOfFreeQuestions = :free_count
-        """
-        expr_values = {
-            ':empty': [],
-            ':new_ids': new_ids,
-            ':new_count': existing_count + len(new_ids),
-            ':paid_count': existing_paid + paid_count,
-            ':free_count': existing_free + free_count
-        }
-
-        update_resp = ModuleTable.update_item(
-            Key={'module_id': module_id},
-            UpdateExpression=update_expr,
-            ExpressionAttributeValues=expr_values,
-            ReturnValues='UPDATED_NEW'
-        )
-
-        return update_resp.get('Attributes', {})
-
+                ModuleTable.meta.client.transact_write_items(TransactItems=transaction)
+            except ClientError as error:
+                reasons = {reason.get('Code') for reason in error.response.get('CancellationReasons', [])}
+                if reasons.intersection({'ConditionalCheckFailed', 'TransactionConflict'}) and conflicts < 3:
+                    sleep(0.02 * 2 ** conflicts)
+                    conflicts += 1
+                    continue
+                raise
+            conflicts = 0
+            remaining = remaining[len(batch):]
     except (ClientError, BotoCoreError) as e:
-        raise RuntimeError(f"DynamoDB error: {e}")
-    except Exception as e:
-        raise RuntimeError(f"Unexpected error: {e}")
+        raise RuntimeError(f"DynamoDB error: {e}") from e
 
-def count_questions_by_difficulty(module_id: str, difficulty: str) -> int:
+def count_questions_by_difficulty(module_id: str, difficulty: str, *, consistent_read=False) -> int:
     """
     Count how many questions in QuestionTable for the given module_id
     have difficulty == difficulty (e.g. 'Easy', 'Medium', 'Hard').
@@ -535,7 +594,8 @@ def count_questions_by_difficulty(module_id: str, difficulty: str) -> int:
         resp = QuestionTable.scan(
             FilterExpression=Attr('question_id').begins_with(prefix) &
                              Attr('difficulty').eq(difficulty),
-            Select='COUNT'
+            Select='COUNT',
+            ConsistentRead=consistent_read,
         )
         total = resp.get('Count', 0)
 
@@ -545,6 +605,7 @@ def count_questions_by_difficulty(module_id: str, difficulty: str) -> int:
                 FilterExpression=Attr('question_id').begins_with(prefix) &
                                  Attr('difficulty').eq(difficulty),
                 Select='COUNT',
+                ConsistentRead=consistent_read,
                 ExclusiveStartKey=resp['LastEvaluatedKey']
             )
             total += resp.get('Count', 0)
@@ -558,31 +619,34 @@ def count_questions_by_difficulty(module_id: str, difficulty: str) -> int:
 
 
 
-def count_exam_questions_by_difficulty(exam_id: str, difficulty: str) -> int:
-    """
-    Fetches the list of module IDs for the given exam_id from ExamTable,
-    then for each module, counts questions of the given difficulty
-    (using your count_questions_by_difficulty function), and returns the sum.
-    """
-    try:
-        # 1) load exam record
-        resp = ExamTable.get_item(Key={'exam_id': exam_id})
-        exam = resp.get('Item')
-        if not exam or 'modules' not in exam:
-            # no modules found → zero questions
-            raise Exception(f"ERROR modules not found")
+def get_exam_difficulty_counts(exam_id: str) -> dict:
+    exam = ExamTable.get_item(Key={'exam_id': exam_id}).get('Item', {})
+    if 'modules' not in exam:
+        raise RuntimeError("ERROR modules not found")
 
-        total = 0
-        # 2) for each module, count and accumulate
-        for module_id in exam['modules']:
-            total += count_questions_by_difficulty(module_id, difficulty)
+    module_ids = list(dict.fromkeys(exam['modules']))
+    modules = {}
+    if os.getenv("USE_STORED_QUESTION_DIFFICULTY_COUNTS") == "1":
+        try:
+            modules = batch_get_question_metadata(
+                ModuleTable, "module_id", module_ids, ["questionDifficultyCounts"]
+            )
+        except (ClientError, BotoCoreError, RuntimeError):
+            logging.getLogger(__name__).warning("Falling back to question scans for exam %s", exam_id)
 
-        return total
-
-    except (ClientError, BotoCoreError) as e:
-        raise RuntimeError(
-            f"Error counting {difficulty} questions for exam {exam_id}: {e}"
-        )
+    counts_by_module = {}
+    for module_id in module_ids:
+        counts = stored_difficulty_counts(modules.get(module_id, {}))
+        if counts is None:
+            counts = {
+                level: count_questions_by_difficulty(module_id, level)
+                for level in QUESTION_DIFFICULTIES
+            }
+        counts_by_module[module_id] = counts
+    return {
+        level: sum(counts_by_module[module_id][level] for module_id in exam['modules'])
+        for level in QUESTION_DIFFICULTIES
+    }
 
 
 def get_likelyhood_clearing_value(
@@ -641,13 +705,14 @@ def submit_questions(data, user):
         print(f"ERROR IN UPDATING COMPLETED IDX: {e}")
 
     # ─── 3. updating data_graph_leetcode_accuracy ────────────────────────────
-    user.setdefault("data_graph_leetcode_accuracy", {})
-    user["data_graph_leetcode_accuracy"].setdefault(exam_id, {
-        "easy":   {"number_solved": 0, "total_questions": count_exam_questions_by_difficulty(exam_id, 'Easy'),   "correct_answered": 0},
-        "medium": {"number_solved": 0, "total_questions": count_exam_questions_by_difficulty(exam_id,  'Medium'), "correct_answered": 0},
-        "hard":   {"number_solved": 0, "total_questions": count_exam_questions_by_difficulty(exam_id,  'Hard'),   "correct_answered": 0},
-    })
-    graph = user["data_graph_leetcode_accuracy"][exam_id]
+    exam_graphs = user.setdefault("data_graph_leetcode_accuracy", {})
+    if exam_id not in exam_graphs:
+        counts = get_exam_difficulty_counts(exam_id)
+        exam_graphs[exam_id] = {
+            level.lower(): {"number_solved": 0, "total_questions": total, "correct_answered": 0}
+            for level, total in counts.items()
+        }
+    graph = exam_graphs[exam_id]
     total_incorrect_for_likelyhood = 0
     for level in ("easy", "medium", "hard"):
         correct   = data.get(f"{level}_correct", 0)
@@ -678,8 +743,8 @@ def submit_questions(data, user):
     # ensure each counter/key exists
     module_stats.setdefault("correct_answers", 0)
     module_stats.setdefault("incorrect_answers", 0)
-    module_stats.setdefault("total_questions",
-                        get_module_no_of_questions_for_init(module_id))
+    if "total_questions" not in module_stats:
+        module_stats["total_questions"] = get_module_no_of_questions_for_init(module_id)
 
     # now safely add your new totals
     total_correct   = sum(data.get(f"{lvl}_correct",   0) for lvl in ("easy","medium","hard"))
@@ -893,8 +958,10 @@ def initialize_new_module(exam_id, module_name):
                 'exam_id': exam_id,
                 'questions': [],
                 'numberOfQuestions': 0,
+                'questionDifficultyCounts': dict.fromkeys(QUESTION_DIFFICULTIES, 0),
                 'subtopics': []
-            }
+            },
+            ConditionExpression='attribute_not_exists(module_id)',
         )
         if response.get('ResponseMetadata', {}).get('HTTPStatusCode') == 200:
             update_response = ExamTable.update_item(
