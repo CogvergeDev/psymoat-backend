@@ -1000,7 +1000,7 @@ def get_users_with_exams_paid_for_no_payment_fields_route():
 @jwt_required()
 def admin_change_password_route():
     # User email keys are case-sensitive. Allow only the exact signed-in identity.
-    admins = {email.strip() for email in os.getenv("PASSWORD_ADMIN_EMAILS", "").split(",") if email.strip()}
+    admins = {email.strip() for email in os.getenv("CATALOG_ADMIN_EMAILS", "").split(",") if email.strip()}
     if get_jwt_identity() not in admins:
         return api_error("Your account is not allowed to change user passwords.", "ADMIN_REQUIRED", 403)
 

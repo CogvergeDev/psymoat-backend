@@ -41,10 +41,10 @@ rightmost proxy-appended addresses should be trusted.
 
 ## God Mode password changes
 
-Before deploying the protected route, set `PASSWORD_ADMIN_EMAILS` on Render to
-the comma-separated, case-sensitive account emails of the admins approved to
-change other users' passwords. Admins use their existing Psymoat login. An empty
-list denies the operation for all accounts.
+God Mode password changes use the existing `CATALOG_ADMIN_EMAILS` allowlist on
+Render. Admins use their existing Psymoat login. Each listed email must exactly
+match the case of the account's email for password changes. An empty list denies
+the operation for all accounts.
 
 The approved browser origins default to `https://www.psymoat.in`,
 `https://psymoat-frontend.vercel.app`, and `https://psymoat.vercel.app`. Use

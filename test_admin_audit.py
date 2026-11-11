@@ -26,7 +26,6 @@ class AdminAuditTests(unittest.TestCase):
                                            'REGION_NAME': 'us-east-1', 'ADMIN_AUDIT_TABLE': TABLE_NAME,
                                            'ADMIN_AUDIT_TRUSTED_PROXY_HOPS': '0',
                                            'CATALOG_ADMIN_EMAILS': 'admin@example.test',
-                                           'PASSWORD_ADMIN_EMAILS': 'admin@example.test',
                                            'PASSWORD_ADMIN_ORIGINS': 'https://frontend.example.test'})
         self.env.start()
         self.resource = boto3.resource('dynamodb', region_name='us-east-1')

@@ -28,7 +28,7 @@ class AccountSecurityTests(unittest.TestCase):
             'FRONTEND_URL': 'https://frontend.example.test', 'ACCOUNT_OPERATIONS_TABLE': 'AccountOperations',
             'ACCOUNT_TOKEN_SECRET': 'test-account-token-secret-with-32-characters',
             'EMAIL_RETRY_SECRET': 'test-email-retry-secret-with-32-characters', 'ACCOUNT_TRUSTED_PROXY_HOPS': '0',
-            'PASSWORD_ADMIN_EMAILS': 'admin@example.test',
+            'CATALOG_ADMIN_EMAILS': 'admin@example.test',
             'PASSWORD_ADMIN_ORIGINS': 'https://frontend.example.test',
         }); self.env.start()
         self.resource = boto3.resource('dynamodb', region_name='us-east-1')
@@ -401,7 +401,7 @@ class AccountSecurityTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 403)
                 response = self.client.post(path, json=body, headers={**admin, **origin}, content_type='text/plain')
                 self.assertEqual(response.status_code, 400)
-                with patch.dict(os.environ, {'PASSWORD_ADMIN_EMAILS': ''}):
+                with patch.dict(os.environ, {'CATALOG_ADMIN_EMAILS': ''}):
                     response = self.client.post(path, json=body, headers={**admin, **origin})
                     self.assertEqual(response.status_code, 403)
         self.assertEqual(self.user(), original)
