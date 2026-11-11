@@ -18,7 +18,7 @@ from account_mail import (MailConfigurationError, RESET_SECONDS, drain, new_job,
                           token_digest, try_deliver)
 
 logger = logging.getLogger(__name__)
-RESET_MESSAGE = 'Check your inbox and spam folder for a Psymoat reset link.'
+RESET_MESSAGE = 'Reset request received. Reset links are sent only to registered email addresses.'
 
 
 def password_version(user):

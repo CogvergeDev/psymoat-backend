@@ -127,7 +127,10 @@ class AccountSecurityTests(unittest.TestCase):
 
     def test_forgot_has_same_response_for_existing_unknown_and_provider_outage(self):
         self.http.side_effect = Timeout()
-        known = self.forgot(); unknown = self.forgot('unknown@example.test')
+        unknown = self.forgot('unknown@example.test')
+        self.assertEqual(self.mails('password_reset'), [])
+        self.http.assert_not_called()
+        known = self.forgot()
         self.assertEqual(known.status_code, 200); self.assertEqual(known.json, unknown.json)
         self.assertEqual(self.http.call_count, 1)
 
