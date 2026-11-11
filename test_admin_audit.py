@@ -25,7 +25,9 @@ class AdminAuditTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {'AWS_ACCESS_KEY_ID': 'testing', 'AWS_SECRET_ACCESS_KEY': 'testing',
                                            'REGION_NAME': 'us-east-1', 'ADMIN_AUDIT_TABLE': TABLE_NAME,
                                            'ADMIN_AUDIT_TRUSTED_PROXY_HOPS': '0',
-                                           'CATALOG_ADMIN_EMAILS': 'admin@example.test'})
+                                           'CATALOG_ADMIN_EMAILS': 'admin@example.test',
+                                           'PASSWORD_ADMIN_EMAILS': 'admin@example.test',
+                                           'PASSWORD_ADMIN_ORIGINS': 'https://frontend.example.test'})
         self.env.start()
         self.resource = boto3.resource('dynamodb', region_name='us-east-1')
         provision(self.resource)
@@ -207,8 +209,12 @@ class AdminAuditTests(unittest.TestCase):
 
     def test_password_and_signed_urls_never_logged_even_when_nested(self):
         self.actual_handlers()
-        response = self.client.post('/change-password', json={'email': 'student@example.test', 'new_password': 'VerySecret987!'})
+        self.db.UserTable.put_item(Item={'email': 'student@example.test', 'password': 'old-password-hash'})
+        response = self.client.post('/admin-change-password',
+                                    json={'email': 'student@example.test', 'new_password': 'VerySecret987!'},
+                                    headers={**self.token(), 'Origin': 'https://frontend.example.test'})
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.events('completed')[0]['actor']['identity'], 'admin@example.test')
         self.assertNotIn('VerySecret987!', json.dumps(self.events(), default=str))
         data = safe_fields({'instructor_details': {'name': 'Teacher', 'password': 'nested-secret', 'token': 'nested-token'},
                             'notes_markdown': 'secret-content', 'video_key': 'https://storage.test/file?X-Amz-Signature=private',
@@ -407,7 +413,8 @@ class AdminAuditTests(unittest.TestCase):
 
     def test_all_god_mode_route_patterns_are_registered_and_audited(self):
         source = self.actual_handlers()
-        expected = [('/grant-paid-access', 'POST'), ('/change-password', 'POST'), ('/export-users-by-plan', 'POST'),
+        expected = [('/grant-paid-access', 'POST'), ('/admin-change-password', 'POST'), ('/change-password', 'POST'),
+                    ('/export-users-by-plan', 'POST'),
                     ('/add-new-lecture', 'POST'), ('/update-lecture/<string:lecture_id>', 'PUT'),
                     ('/delete-lecture/<string:lecture_id>', 'DELETE'), ('/add-standalone-note', 'POST'),
                     ('/update-standalone-note/<string:note_id>', 'PUT'), ('/delete-standalone-note/<string:note_id>', 'DELETE'),

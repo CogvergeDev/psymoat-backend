@@ -26,7 +26,7 @@ from flask_jwt_extended import (
 )
 from datetime import datetime, timedelta
 import logging
-from time import sleep
+from time import sleep, time
 from admin_audit import audit_state, audit_child_start, audit_child_finish
 from dateutil.relativedelta import relativedelta
 from dateutil import parser
@@ -2361,22 +2361,25 @@ def clear_payment_fields_for_users_with_exam_paid_for_no_payment_fields() -> dic
         return {"status": "error", "message": str(e)}
 
 
-def change_user_password(email: str, new_password: str) -> dict:
-    """
-    Changes the password for the user with the given email.
-    """
+def change_user_password(email: str, new_password: str):
+    """Replace an existing password and revoke previous sessions and reset links."""
     try:
-        # Hash the new password using bcrypt (same as register)
         hashed_pw = bcrypt.generate_password_hash(new_password).decode('utf-8')
-        resp = UserTable.update_item(
+        UserTable.update_item(
             Key={'email': email},
-            UpdateExpression="SET password = :pw",
-            ExpressionAttributeValues={':pw': hashed_pw},
-            ReturnValues="UPDATED_NEW"
+            ConditionExpression="attribute_exists(email) AND attribute_exists(password)",
+            UpdateExpression=(
+                "SET password = :pw, password_changed_at = :now "
+                "REMOVE password_reset_digest, password_reset_expires"
+            ),
+            ExpressionAttributeValues={':pw': hashed_pw, ':now': int(time())},
         )
-        return {"status": "success", "message": "Password updated successfully."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except (ClientError, BotoCoreError) as error:
+        if isinstance(error, ClientError) and error.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            return api_error("No user account was found for that email address.", "USER_NOT_FOUND", 404)
+        logging.error("ADMIN_PASSWORD_CHANGE_UNAVAILABLE category=%s", type(error).__name__)
+        return api_error("We could not change the password right now. Please try again.", "SERVICE_UNAVAILABLE", 503)
+    return jsonify(status="success", message="Password changed."), 200
     
 
 

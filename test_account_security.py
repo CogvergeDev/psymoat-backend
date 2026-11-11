@@ -28,6 +28,8 @@ class AccountSecurityTests(unittest.TestCase):
             'FRONTEND_URL': 'https://frontend.example.test', 'ACCOUNT_OPERATIONS_TABLE': 'AccountOperations',
             'ACCOUNT_TOKEN_SECRET': 'test-account-token-secret-with-32-characters',
             'EMAIL_RETRY_SECRET': 'test-email-retry-secret-with-32-characters', 'ACCOUNT_TRUSTED_PROXY_HOPS': '0',
+            'PASSWORD_ADMIN_EMAILS': 'admin@example.test',
+            'PASSWORD_ADMIN_ORIGINS': 'https://frontend.example.test',
         }); self.env.start()
         self.resource = boto3.resource('dynamodb', region_name='us-east-1')
         self.resource.create_table(TableName='User', BillingMode='PAY_PER_REQUEST',
@@ -47,8 +49,9 @@ class AccountSecurityTests(unittest.TestCase):
         self.app = Flask(__name__)
         self.app.config.update(TESTING=True, JWT_SECRET_KEY='test-session-secret-with-at-least-32-characters', JWT_TOKEN_LOCATION=['headers'], JWT_COOKIE_CSRF_PROTECT=False)
         jwt = JWTManager(self.app); install_auth_errors(jwt); install_account_security(self.app, self.db)
-        for path in ('login', 'register', 'get-user', 'admin-change-password'):
-            view = source.app.view_functions['change_password_route' if path == 'admin-change-password' else path.replace('-', '_')]
+        for path in ('login', 'register', 'get-user', 'admin-change-password', 'change-password'):
+            endpoint = 'admin_change_password_route' if path.endswith('change-password') else path.replace('-', '_')
+            view = source.app.view_functions[endpoint]
             self.app.add_url_rule('/' + path, endpoint=path, view_func=view, methods=['GET'] if path == 'get-user' else ['POST'])
         @self.app.get('/protected')
         @jwt_required()
@@ -380,9 +383,63 @@ class AccountSecurityTests(unittest.TestCase):
                 response = self.forgot(f'unknown{i}@example.test', headers={'X-Forwarded-For': f'203.0.113.1, 198.51.100.{i}'})
                 self.assertEqual(response.status_code, 200)
 
-    def test_admin_endpoint_is_renamed_with_existing_behavior_preserved(self):
-        self.assertEqual(self.client.post('/change-password', json={}).status_code, 404)
-        self.assertEqual(self.client.post('/admin-change-password', json={'email': self.email, 'new_password': 'admin-new-password'}).status_code, 200)
+    def test_admin_password_routes_require_an_approved_account_and_origin(self):
+        origin = {'Origin': 'https://frontend.example.test'}
+        body = {'email': self.email, 'new_password': 'admin-new-password'}
+        original = self.user()
+        self.users.put_item(Item={'email': 'Admin@example.test', 'password': original['password']})
+        self.users.put_item(Item={'email': 'admin@example.test', 'password': original['password']})
+        for path in ('/admin-change-password', '/change-password'):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=body, headers=origin).status_code, 401)
+                for email in (self.email, 'Admin@example.test'):
+                    response = self.client.post(path, json=body, headers={**self.headers(email), **origin})
+                    self.assertEqual(response.status_code, 403)
+                admin = self.headers('admin@example.test')
+                for untrusted_origin in ({}, {'Origin': 'https://frontend.example.test.invalid'}):
+                    response = self.client.post(path, json=body, headers={**admin, **untrusted_origin})
+                    self.assertEqual(response.status_code, 403)
+                response = self.client.post(path, json=body, headers={**admin, **origin}, content_type='text/plain')
+                self.assertEqual(response.status_code, 400)
+                with patch.dict(os.environ, {'PASSWORD_ADMIN_EMAILS': ''}):
+                    response = self.client.post(path, json=body, headers={**admin, **origin})
+                    self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.user(), original)
+
+    def test_admin_password_change_revokes_target_sessions_and_existing_reset_link(self):
+        self.users.put_item(Item={'email': 'admin@example.test', 'password': self.user()['password']})
+        self.app.config['JWT_TOKEN_LOCATION'] = ['headers', 'cookies']
+        admin_token = self.headers('admin@example.test')['Authorization'].removeprefix('Bearer ')
+        old_access, old_refresh = self.headers(), self.headers(refresh=True)
+        legacy = self.headers(legacy=True)
+        token, _ = self.issue()
+        self.client.set_cookie('access_token_cookie', admin_token)
+        origin = {'Origin': 'https://frontend.example.test'}
+        password = 'admin-new-password'
+        response = self.client.post('/admin-change-password', headers=origin,
+                                    json={'email': self.email, 'new_password': password})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(password, response.get_data(as_text=True))
+        self.assertEqual(self.client.get_cookie('access_token_cookie').value, admin_token)
+        updated = self.user()
+        self.assertTrue(self.db.bcrypt.check_password_hash(updated['password'], password))
+        self.assertNotIn('password_reset_digest', updated)
+        self.assertNotIn('password_reset_expires', updated)
+        for headers in (old_access, legacy):
+            self.assertEqual(self.client.get('/protected', headers=headers).status_code, 401)
+        self.assertEqual(self.client.get('/refresh-protected', headers=old_refresh).status_code, 401)
+        self.assertEqual(self.reset(token).status_code, 400)
+        self.assertEqual(self.client.get('/protected').status_code, 200)
+        self.assertEqual(self.client.post('/login', json={'email': self.email, 'password': password}).status_code, 200)
+
+    def test_admin_password_change_cannot_create_an_account(self):
+        self.users.put_item(Item={'email': 'admin@example.test', 'password': self.user()['password']})
+        email = 'missing@example.test'
+        headers = {**self.headers('admin@example.test'), 'Origin': 'https://frontend.example.test'}
+        response = self.client.post('/admin-change-password', headers=headers,
+                                    json={'email': email, 'new_password': 'admin-new-password'})
+        self.assertEqual(response.status_code, 404)
+        self.assertIsNone(self.user(email))
 
     def test_provisioning_is_idempotent(self):
         self.assertEqual(provision(self.resource)['TableName'], 'AccountOperations')

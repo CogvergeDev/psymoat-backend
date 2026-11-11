@@ -35,6 +35,7 @@ ROUTES = {
     ("POST", "/razorpay/webhook"): "payment.webhook",
     ("POST", "/grant-paid-access"): "access.grant",
     ("POST", "/change-password"): "password.reset",
+    ("POST", "/admin-change-password"): "password.reset",
     ("POST", "/export-users-by-plan"): "users.export",
     ("DELETE", "/delete-payment-fields"): "access.remove",
     ("POST", "/cleanup-expired-plans"): "subscriptions.cleanup",

@@ -39,6 +39,23 @@ request with one trusted proxy appending the client address, use `1`; a frontend
 proxy can add another hop. Check the actual chain rather than guessing. Only
 rightmost proxy-appended addresses should be trusted.
 
+## God Mode password changes
+
+Before deploying the protected route, set `PASSWORD_ADMIN_EMAILS` on Render to
+the comma-separated, case-sensitive account emails of the admins approved to
+change other users' passwords. Admins use their existing Psymoat login. An empty
+list denies the operation for all accounts.
+
+The approved browser origins default to `https://www.psymoat.in`,
+`https://psymoat-frontend.vercel.app`, and `https://psymoat.vercel.app`. Use
+`PASSWORD_ADMIN_ORIGINS` to specify the complete comma-separated list for other
+deployments, such as `http://localhost:3000` for local testing.
+
+Deploy the backend before switching the frontend. Both `/change-password` and
+`/admin-change-password` use the same admin and origin checks, so a previously
+deployed frontend can continue using the old path while the new one rolls out.
+Verify the action against an account you control before using it for support.
+
 ## One-time DynamoDB setup
 
 From `psymoat-backend`, after selecting the correct AWS account/region and table:

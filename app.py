@@ -92,7 +92,7 @@ jwt = JWTManager(app)
 from api_errors import api_error, install_auth_errors
 install_auth_errors(jwt)
 
-from account_security import install_account_security
+from account_security import install_account_security, valid_new_password
 install_account_security(app, dynamodb)
 
 # The catalog is additive; provisioning and import are explicit offline commands.
@@ -995,16 +995,31 @@ def get_users_with_exams_paid_for_no_payment_fields_route():
     result = dynamodb.clear_payment_fields_for_users_with_exam_paid_for_no_payment_fields()
     return jsonify(result), 200 if result.get("status") in ("success", "partial_success") else 500
 
-@app.route('/change-password', methods=['POST'])
-def change_password_route():
-    data = request.get_json(force=True)
-    email = data.get('email')
-    new_password = data.get('new_password')
-    if not email or not new_password:
-        return jsonify({"status": "error", "message": "email and new_password are required"}), 400
-    result = dynamodb.change_user_password(email, new_password)
-    status = 200 if result.get("status") == "success" else 500
-    return jsonify(result), status
+@app.post('/change-password')
+@app.post('/admin-change-password')
+@jwt_required()
+def admin_change_password_route():
+    # User email keys are case-sensitive. Allow only the exact signed-in identity.
+    admins = {email.strip() for email in os.getenv("PASSWORD_ADMIN_EMAILS", "").split(",") if email.strip()}
+    if get_jwt_identity() not in admins:
+        return api_error("Your account is not allowed to change user passwords.", "ADMIN_REQUIRED", 403)
+
+    # Cookie-authenticated POSTs must come from an approved frontend origin.
+    origins = os.getenv(
+        "PASSWORD_ADMIN_ORIGINS",
+        "https://www.psymoat.in,https://psymoat-frontend.vercel.app,https://psymoat.vercel.app",
+    )
+    if request.headers.get("Origin") not in {origin.strip() for origin in origins.split(",") if origin.strip()}:
+        return api_error("Open God Mode from the approved Psymoat site.", "ORIGIN_NOT_ALLOWED", 403)
+    data = request.get_json(silent=True)
+    if request.mimetype != "application/json" or not isinstance(data, dict):
+        return api_error("Please provide an email address and a new password.", "INVALID_INPUT", 400)
+    try:
+        new_password = valid_new_password(data.get("new_password"))
+        email = dynamodb.validate_credentials(data.get("email"), new_password)
+    except ValueError as error:
+        return api_error(str(error), "INVALID_INPUT", 400)
+    return dynamodb.change_user_password(email, new_password)
 
 @app.route('/remove-user-graphs', methods=['POST'])
 def remove_user_graphs_route():
